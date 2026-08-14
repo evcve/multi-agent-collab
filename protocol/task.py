@@ -14,15 +14,19 @@ class Task:
     goal: str                      # 目标：一句话说清要什么
     context: str = ""              # 上下文：关键数据内嵌（勿引用外部文件路径）
     constraints: str = ""          # 约束：边界/禁止事项/输出格式
-    acceptance: str = ""           # 验收标准：可检查的交付物
+    acceptance: str = ""           # 验收标准：可检查的交付物（可配合 result_schema 自动核验）
     # 运行时字段
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     target_agent: str = "worker"
     timeout: int = 120
     status: str = "pending"        # pending / processing / done / failed / need_confirm / timeout
+    priority: str = "normal"       # high / normal / low（worker 按此消费，紧急任务插队）
+    progress: int = 0              # 0~100，长任务心跳
+    progress_note: str = ""        # 进度说明
+    result_schema: Optional[dict] = None  # 可选 JSON Schema，结果自动核验
     created_at: float = field(default_factory=time.time)
     result: Optional[Any] = None   # done 时：可验证句柄（路径/数值）；failed：原因；need_confirm：选项
-    result_meta: dict = field(default_factory=dict)
+    result_meta: dict = field(default_factory=dict)  # 含 retryable / note / validation
 
     @property
     def prompt(self) -> str:
@@ -34,9 +38,11 @@ class Task:
             parts.append(f"【约束】{self.constraints}")
         if self.acceptance:
             parts.append(f"【验收标准】{self.acceptance}")
-        parts.append("【反馈格式】只输出三态之一：\n"
+        parts.append("【反馈格式】按以下三态输出：\n"
                      "[状态] done / failed / need_confirm\n"
-                     "[结果] <内容>。不确定就说不知道，绝不编造。")
+                     "[结果] <内容>\n"
+                     "[备注] <可选：解释/建议/原因，不参与状态判断>\n"
+                     "不确定就说不知道，绝不编造。")
         return "\n".join(parts)
 
     def to_dict(self) -> dict:

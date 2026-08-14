@@ -50,7 +50,7 @@ FileQueue(base_dir: str)   # creates base_dir/queue and base_dir/results
 | Method | Signature | Behavior |
 |---|---|---|
 | `submit` | `(task: Task) -> task_id` | Writes `queue/<id>.json` (atomic), returns id |
-| `wait_result` | `(task_id, timeout=300.0, poll_interval=1.0) -> Task` | Polls `results/<id>.json` (backoff 1s→5s); consumes file on read; returns `status="timeout"` Task on expiry; idempotent cleanup |
+| `wait_result` | `(task_id, timeout=300.0, poll_interval=1.0, progress_callback=None) -> Task` | Polls `results/<id>.json` (backoff 1s→5s); consumes file on read; returns `status="timeout"` Task on expiry; idempotent cleanup. `progress_callback(progress, note)` called on each poll while running |
 
 ### Worker side
 
@@ -58,6 +58,8 @@ FileQueue(base_dir: str)   # creates base_dir/queue and base_dir/results
 |---|---|---|
 | `scan` | `() -> list[Task]` | Returns all `pending` tasks (processing ones excluded) |
 | `mark_processing` | `(task) -> None` | Sets status and rewrites queue file |
+| `report_progress` | `(task, progress, note="") -> None` | Heartbeat: updates progress fields in the queue file |
+| `cancel` / `is_cancelled` | `(task_id) -> None` / `-> bool` | Cancellation protocol: worker skips cancelled tasks |
 | `complete` | `(task) -> None` | **Atomically** writes `results/<id>.json` (tmp + `os.replace`), deletes queue file |
 
 ## `protocol.worker`
@@ -69,7 +71,8 @@ Worker loop + LLM integration.
 | Function | Signature | Behavior |
 |---|---|---|
 | `call_llm` | `(prompt, timeout=120) -> str` | POST to `LLM_BASE_URL/chat/completions` with `LLM_API_KEY`, `LLM_MODEL`, `LLM_MAX_TOKENS` |
-| `parse_three_state` | `(raw: str) -> (status, result)` | Parses `[状态]`/`[结果]` lines; **missing/invalid status → `failed`** (never silent `done`) |
+| `parse_three_state` | `(raw: str) -> (status, result, note)` | Parses `[状态]`/`[结果]`/`[备注]` lines; **missing/invalid status → `failed`** (never silent `done`); note stored in `result_meta.note` |
+| `validate_schema` | `(data, schema) -> list` | Minimal JSON-Schema subset (type/required/properties); returns errors (empty = pass) |
 
 ### Environment variables
 

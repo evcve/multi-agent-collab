@@ -35,31 +35,31 @@ def test_task_roundtrip_dict():
 
 # ── 三态解析 ────────────────────────────────────────────────────────
 def test_parse_three_state_done():
-    s, r = parse_three_state("[状态] done\n[结果] 完成，文件 /tmp/a.json")
+    s, r, _ = parse_three_state("[状态] done\n[结果] 完成，文件 /tmp/a.json")
     assert s == "done" and "/tmp/a.json" in r
 
 
 def test_parse_three_state_failed_and_confirm():
-    s, r = parse_three_state("[状态] failed\n[结果] 权限不足")
+    s, r, _ = parse_three_state("[状态] failed\n[结果] 权限不足")
     assert s == "failed"
-    s2, _ = parse_three_state("[状态] need_confirm\n[结果] 选项A/选项B")
+    s2, _, _ = parse_three_state("[状态] need_confirm\n[结果] 选项A/选项B")
     assert s2 == "need_confirm"
 
 
 def test_parse_three_state_missing_status_is_failed():
     """防误报：无 [状态] 标记时绝不能静默当 done。"""
-    s, r = parse_three_state("好的，我完成了任务！")   # LLM 自由文本
+    s, r, _ = parse_three_state("好的，我完成了任务！")   # LLM 自由文本
     assert s == "failed"
     assert "三态格式" in r
 
 
 def test_parse_three_state_unknown_status_is_failed():
-    s, _ = parse_three_state("[状态] maybe\n[结果] 不确定")
+    s, _, _ = parse_three_state("[状态] maybe\n[结果] 不确定")
     assert s == "failed"
 
 
 def test_parse_three_state_status_without_result_keeps_status():
-    s, r = parse_three_state("[状态] done\n输出了一些内容")
+    s, r, _ = parse_three_state("[状态] done\n输出了一些内容")
     assert s == "done"
 
 
@@ -106,3 +106,96 @@ def test_scan_only_pending(tmp_path):
     q.submit(t)
     q.mark_processing(t)
     assert q.scan() == []   # processing 不算 pending
+
+
+# ── V0.2 新特性：备注 / 优先级 / 取消 / Schema / 进度 ─────────────
+def test_parse_note_channel():
+    s, r, note = parse_three_state("[状态] done\n[结果] 完成\n[备注] 用了方法X")
+    assert s == "done" and note == "用了方法X"
+
+
+def test_scan_priority_order(tmp_path):
+    q = FileQueue(str(tmp_path))
+    q.submit(Task(goal="low", priority="low"))
+    q.submit(Task(goal="high", priority="high"))
+    q.submit(Task(goal="normal", priority="normal"))
+    order = [t.goal for t in q.scan()]
+    assert order == ["high", "normal", "low"]
+
+
+def test_cancel_skips_task(tmp_path):
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g")
+    q.submit(t)
+    q.cancel(t.task_id)
+    assert q.scan() == []          # 取消的任务不再派发
+    assert q.is_cancelled(t.task_id)
+
+
+def test_worker_marks_cancelled_task(tmp_path):
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g")
+    q.submit(t)
+    q.cancel(t.task_id)
+    process_one(t, q)               # worker 处理
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "failed" and "cancelled" in got.result
+
+
+def test_schema_validation_ok(tmp_path, monkeypatch):
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g", result_schema={
+        "type": "object", "required": ["name", "mass"],
+        "properties": {"name": {"type": "string"}, "mass": {"type": "number"}}})
+    q.submit(t)
+    monkeypatch.setattr("protocol.worker.call_llm",
+                        lambda prompt, **kw: '[状态] done\n[结果] {"name": "X", "mass": 3.5}')
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "done"
+    assert got.result_meta.get("validation") == "ok"
+
+
+def test_schema_validation_fails_wrong_type(tmp_path, monkeypatch):
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g", result_schema={
+        "type": "object", "required": ["mass"],
+        "properties": {"mass": {"type": "number"}}})
+    q.submit(t)
+    monkeypatch.setattr("protocol.worker.call_llm",
+                        lambda prompt, **kw: '[状态] done\n[结果] {"mass": "not-a-number"}')
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "failed"
+    assert got.result_meta.get("retryable") is False
+    assert "schema" in got.result
+
+
+def test_progress_callback_receives_heartbeat(tmp_path):
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="long")
+    q.submit(t)
+    # 模拟 worker 心跳：report_progress 更新任务文件
+    q.mark_processing(t)
+    q.report_progress(t, 50, "半程")
+    seen = []
+    q.wait_result(t.task_id, timeout=2,
+                  progress_callback=lambda p, n: seen.append((p, n)))
+    assert (50, "半程") in seen
+
+
+def test_retryable_flag_on_llm_error(tmp_path, monkeypatch):
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g")
+    q.submit(t)
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr("protocol.worker.call_llm", boom)
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "failed"
+    assert got.result_meta.get("retryable") is True   # LLM 调用错误 → 可重试

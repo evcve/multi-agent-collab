@@ -47,35 +47,104 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
-def parse_three_state(raw: str) -> tuple[str, str]:
-    """解析 [状态] done/failed/need_confirm + [结果] 内容。
+def parse_three_state(raw: str) -> tuple[str, str, str]:
+    """解析 [状态] / [结果] / [备注]（备注不参与状态判断，供提交方参考）。
 
     防误报：未找到合法的 [状态] 标记 → 返回 failed（格式偏差绝不能静默降级为 done，
     否则"防幻觉"协议自己会幻觉成功）。
     """
-    status, result = None, None
+    status, result, note = None, None, ""
     for line in raw.splitlines():
         if line.startswith("[状态]"):
             status = line.split("]", 1)[1].strip().lower()
         elif line.startswith("[结果]"):
             result = line.split("]", 1)[1].strip()
+        elif line.startswith("[备注]"):
+            note = line.split("]", 1)[1].strip()
     if status not in ("done", "failed", "need_confirm"):
-        return "failed", f"LLM 输出未遵循三态格式（缺 [状态] 标记）: {raw[:200]}"
+        return "failed", f"LLM 输出未遵循三态格式（缺 [状态] 标记）: {raw[:200]}", note
     if result is None:
         result = raw  # 有状态但缺 [结果] 行：退回原文（状态仍有效）
-    return status, result
+    return status, result, note
+
+
+def validate_schema(data, schema: dict) -> list:
+    """迷你 JSON Schema 校验（stdlib only）：类型 + required + properties 递归。
+
+    返回错误列表（空 = 通过）。仅支持 type/required/properties，够协议用。
+    """
+    errors = []
+
+    def check(value, sch, path):
+        t = sch.get("type")
+        if t == "object":
+            if not isinstance(value, dict):
+                errors.append(f"{path}: 期望 object，实际 {type(value).__name__}")
+                return
+            for k in sch.get("required", []):
+                if k not in value:
+                    errors.append(f"{path}.{k}: 缺少必填字段")
+            for k, sub in sch.get("properties", {}).items():
+                if k in value:
+                    check(value[k], sub, f"{path}.{k}")
+        elif t == "array":
+            if not isinstance(value, list):
+                errors.append(f"{path}: 期望 array，实际 {type(value).__name__}")
+                return
+            for i, item in enumerate(value):
+                check(item, sch.get("items", {}), f"{path}[{i}]")
+        elif t == "string":
+            if not isinstance(value, str):
+                errors.append(f"{path}: 期望 string，实际 {type(value).__name__}")
+        elif t == "number":
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                errors.append(f"{path}: 期望 number，实际 {type(value).__name__}")
+        elif t == "boolean":
+            if not isinstance(value, bool):
+                errors.append(f"{path}: 期望 boolean，实际 {type(value).__name__}")
+
+    check(data, schema, "$")
+    return errors
 
 
 def process_one(task: Task, q: FileQueue) -> None:
     q.mark_processing(task)
+    if q.is_cancelled(task.task_id):
+        task.status = "failed"
+        task.result = "Task cancelled by submitter."
+        task.result_meta = {"retryable": False, "cancelled": True,
+                            "finished_at": time.time()}
+        q.complete(task)
+        print(f"[cancelled] {task.task_id}")
+        return
     try:
         raw = call_llm(task.prompt, timeout=task.timeout)
-        status, result = parse_three_state(raw)
-    except Exception as e:  # LLM 调用失败 → failed（诚实汇报，不掩盖）
-        status, result = "failed", f"LLM call error: {e}"
+        status, result, note = parse_three_state(raw)
+    except Exception as e:  # LLM 调用失败 → failed（诚实汇报，可重试）
+        status, result, note = "failed", f"LLM call error: {e}", ""
     task.status = status
     task.result = result
-    task.result_meta = {"finished_at": time.time()}
+    meta = {"finished_at": time.time(), "retryable": status == "failed"}
+    if note:
+        meta["note"] = note
+    # 结果 Schema 自动核验（done 且提交方给了 schema）
+    if status == "done" and task.result_schema:
+        try:
+            data = json.loads(result)
+            errs = validate_schema(data, task.result_schema)
+            if errs:
+                task.status = "failed"
+                meta["retryable"] = False
+                meta["validation"] = errs
+                task.result = f"结果未通过 schema 校验: {'; '.join(errs)}"
+            else:
+                meta["validation"] = "ok"
+        except json.JSONDecodeError:
+            task.status = "failed"
+            meta["retryable"] = False
+            meta["validation"] = ["结果不是合法 JSON"]
+            task.result = "结果不是合法 JSON，无法通过 schema 校验"
+    task.result_meta = meta
     q.complete(task)
     print(f"[{status}] {task.task_id}: {str(result)[:80]}")
 

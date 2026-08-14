@@ -43,7 +43,7 @@ def run_demo(fake: bool):
         raw = fake_llm(task.prompt)
     else:
         raw = call_llm(task.prompt)
-    status, result = parse_three_state(raw)
+    status, result, _ = parse_three_state(raw)
     task.status = status
     task.result = result
     q.complete(task)
@@ -59,7 +59,7 @@ def run_demo(fake: bool):
         t2 = Task(goal=bad[:40], context="", constraints="", acceptance="")
         q.submit(t2)
         raw = fake_llm(t2.prompt) if fake else call_llm(t2.prompt)
-        st, res = parse_three_state(raw)
+        st, res, _ = parse_three_state(raw)
         t2.status, t2.result = st, res
         q.complete(t2)
         done2 = q.wait_result(t2.task_id, timeout=10)

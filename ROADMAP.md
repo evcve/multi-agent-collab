@@ -32,12 +32,12 @@
 
 | 优先级 | 特性 | 解决痛点 | 方案要点 |
 |---|---|---|---|
-| P0 | `[备注]` 补充通道 | S2 | parse_three_state 忽略备注行，原样存入 result_meta.note |
-| P0 | 验收标准自动核验（JSON Schema） | S5/B6 | acceptance 支持 `schema` 子字段；worker 侧内置轻量校验器 |
-| P1 | 任务优先级 | B1 | Task.priority；FileQueue.scan 按 priority 排序；worker 抢占式消费 |
-| P1 | 心跳/进度 | B2 | Task.progress(int) + progress_note；提交方 wait_result 轮询时顺带读进度 |
-| P1 | 取消协议 | B3 | queue/cancel/<id>.marker；worker 每任务前检查 |
-| P1 | 重试语义 | B4 | 结果 meta 加 retryable；demo 展示 timeout→自动重试 |
+| P0 | ~~`[备注]` 补充通道~~ ✅ | S2 | parse_three_state 解析 [备注] 存入 result_meta.note |
+| P0 | ~~验收标准自动核验（JSON Schema）~~ ✅ | S5/B6 | Task.result_schema + worker 内置校验器（stdlib），失败→failed+validation 报告 |
+| P1 | ~~任务优先级~~ ✅ | B1 | Task.priority(high/normal/low)；scan 按序返回 |
+| P1 | ~~心跳/进度~~ ✅ | B2 | report_progress() + wait_result(progress_callback=...) |
+| P1 | ~~取消协议~~ ✅ | B3 | FileQueue.cancel()/is_cancelled()；worker 执行前检查 |
+| P1 | ~~重试语义~~ ✅ | B4 | result_meta.retryable（LLM错误=可重试，业务失败/取消=否） |
 | P2 | 结构化数据字段 | S1 | context 支持 `字段名: 值` 块渲染（YAML-lite），非纯散文 |
 | P2 | 白名单工具 | S3/B8 | worker 可配置 `ALLOWED_TOOLS`（如只读文件 glob/数学），默认空=纯文本 |
 | P2 | 上下文分块+摘要回传 | S4 | 长任务协议：subtask 列表，每完成一块回传 1 行摘要 |

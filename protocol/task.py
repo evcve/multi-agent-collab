@@ -48,10 +48,12 @@ class Task:
         if self.acceptance:
             parts.append(f"【验收标准】{self.acceptance}")
         if self.tools:
-            parts.append("【可用工具】需要查数据/计算时，输出工具请求行（可多行）：\n"
-                         "[工具] <名称> <参数JSON>\n"
-                         "工具结果会以【工具结果】(系统输出)反馈给你，然后你继续。"
-                         f"可用: {', '.join(self.tools)}")
+            parts.append("【可用工具】需要计算/查数据时，必须**先**输出工具请求行（每行一个）：\n"
+                         "[工具] calc {\"expr\": \"40*30\"}\n"
+                         "系统会执行它并把结果以【工具结果】反馈给你，然后你继续。\n"
+                         "**严禁猜测或编造工具结果**——工具执行前不要描述它的输出；"
+                         "不需要工具时直接输出 [状态]。\n"
+                         f"可用工具: {', '.join(self.tools)}")
         if self.result_schema is not None:
             parts.append("【输出要求】[结果] 必须是合法 JSON；校验仅覆盖数据类型与必填字段"
                          "（不支持 pattern/enum/minLength 等高级约束）：\n"

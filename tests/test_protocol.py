@@ -49,10 +49,16 @@ def test_parse_three_state_failed_and_confirm():
 
 
 def test_parse_three_state_missing_status_is_failed():
-    """防误报：无 [状态] 标记时绝不能静默当 done。"""
+    """防误报：完全无标记（无 [状态] 无 [结果]）→ failed，绝不静默当 done。"""
     s, r, _, _ = parse_three_state("好的，我完成了任务！")   # LLM 自由文本
     assert s == "failed"
     assert "三态格式" in r
+
+
+def test_parse_missing_status_but_has_result_is_done():
+    """宽容降级：真实 LLM 常漏 [状态]——有明确 [结果] 视为 done。"""
+    s, r, _, _ = parse_three_state("[结果] 56088")
+    assert s == "done" and r == "56088"
 
 
 def test_parse_three_state_unknown_status_is_failed():
@@ -482,3 +488,19 @@ def test_summary_requested_in_prompt():
     assert "[摘要]" in t.prompt
     t2 = Task(goal="g")
     assert "[摘要]" not in t2.prompt
+
+
+# ── 鲁棒解析：中文别名 / JSON 兜底（真实 LLM 格式漂移）──
+def test_parse_chinese_alias_done():
+    s, r, _, _ = parse_three_state("[完成]/56088")
+    assert s == "done" and r == "56088"
+
+
+def test_parse_chinese_alias_failed():
+    s, r, _, _ = parse_three_state("[失败]: 网络错误")
+    assert s == "failed" and "网络错误" in r
+
+
+def test_parse_json_fallback():
+    s, r, _, _ = parse_three_state('{"status": "done", "result": "完成"}')
+    assert s == "done" and r == "完成"

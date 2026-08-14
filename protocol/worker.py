@@ -23,68 +23,139 @@ from .queue import FileQueue
 from .task import Task
 
 
+LLM_MAX_TOKENS = os.environ.get("LLM_MAX_TOKENS", "8000")
+
+SYSTEM_PROMPT = (
+    "你是多智能体协作中的任务执行单元（worker）。"
+    "严格按任务要求执行，输出遵循任务中指定的反馈格式（三态/JSON等）。"
+    "不确定就说不知道，绝不编造。"
+)
+
+
 def call_llm(prompt: str, timeout: int = 120) -> str:
-    base = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    key = os.environ.get("LLM_API_KEY", "")
-    if not key:
-        raise RuntimeError("LLM_API_KEY 未设置")
-    model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "2000"))
+    """调 OpenAI 兼容端点；默认智谱 glm-5.2，可用环境变量覆盖。
+
+    LLM_BASE_URL / LLM_API_KEY / LLM_MODEL / LLM_MAX_TOKENS
+    兼容读取 ZHIPUAI_API_KEY / KIMI_API_KEY（按 provider 自动选 key）。
+    """
+    base_url = os.environ.get("LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+    api_key = (os.environ.get("LLM_API_KEY")
+               or os.environ.get("ZHIPUAI_API_KEY")
+               or os.environ.get("KIMI_API_KEY", ""))
+    model = os.environ.get("LLM_MODEL", "glm-5.2")
+    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "8000"))
+    if not api_key:
+        raise RuntimeError("LLM_API_KEY 未设置（或 ZHIPUAI_API_KEY / KIMI_API_KEY）")
     body = json.dumps({
         "model": model,
         "messages": [
-            {"role": "system", "content": "你是多智能体协作中的任务执行单元（worker）。"
-                                          "严格按任务要求执行，输出遵循指定反馈格式。"},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
         "max_tokens": max_tokens,
     }).encode("utf-8")
-    req = urllib.request.Request(f"{base}/chat/completions", data=body, method="POST")
+    req = urllib.request.Request(f"{base_url}/chat/completions", data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Authorization", f"Bearer {api_key}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"].strip()
+    msg = data["choices"][0]["message"]
+    content = (msg.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("模型返回空 content（thinking 吃光 max_tokens？请调大 LLM_MAX_TOKENS）")
+    return content
+
+
+STATUS_ALIASES = {
+    "完成": "done", "成功": "done", "ok": "done", "success": "done",
+    "失败": "failed", "错误": "failed", "error": "failed",
+    "需要确认": "need_confirm", "确认": "need_confirm", "不确定": "need_confirm",
+}
+
+
+def _split_val(line: str) -> str:
+    """'[状态] xxx' -> 'xxx'；去常见分隔符（/、:）；空 -> ''（防 IndexError）。"""
+    rest = line.split("]", 1)[1].strip() if "]" in line else ""
+    if rest.startswith("/"):      # '[完成]/56088'
+        rest = rest[1:].strip()
+    if rest.startswith(":"):      # '[完成]: 内容'
+        rest = rest[1:].strip()
+    return rest
+
+
+def _try_json(raw: str):
+    """JSON 兜底：LLM 直接输出 {"status": ..., "result": ...} 或 {"result": ...}。"""
+    try:
+        d = json.loads(raw.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    status = str(d.get("status", "")).strip().lower()
+    if status not in ("done", "failed", "need_confirm"):
+        status = STATUS_ALIASES.get(status, "")
+    result = d.get("result")
+    if status and result is not None:
+        return status, str(result), "", str(d.get("summary", "") or "")
+    return None
 
 
 def parse_three_state(raw: str) -> tuple[str, str, str, str]:
-    """解析 [状态] / [结果] / [备注] / [摘要]。
+    """解析 [状态] / [结果] / [备注] / [摘要]（含中文别名与 JSON 兜底）。
 
     备注支持多行：`[备注]` 之后直到下一个 `[标记]` 或结尾的所有行都归入备注。
     摘要（[摘要] 一行）用于长任务分块链，单独返回。
-    防误报：未找到合法的 [状态] 标记 → 返回 failed（格式偏差绝不能静默降级为 done，
-    否则"防幻觉"协议自己会幻觉成功）。
+    防误报：完全无标记 → failed（格式偏差绝不静默降级为 done——除非有非空
+    [结果]/[完成] 类内容，那是真实 LLM 的格式漂移，宽容接受）。
     """
     status, result, note = None, None, ""
     summary = None
     lines = raw.splitlines()
     in_note = False
     note_parts = []
-
-    def split_val(line: str) -> str:
-        """'[状态] xxx' -> 'xxx'；'[状态]'（无内容）-> ''（防 IndexError）。"""
-        return line.split("]", 1)[1].strip() if "]" in line else ""
-
     for line in lines:
         if line.startswith("[状态]"):
             in_note = False
-            status = split_val(line).lower()
+            status = _split_val(line).lower()
+            status = STATUS_ALIASES.get(status, status)   # 中文别名映射（[状态] 完成 → done）
         elif line.startswith("[结果]"):
             in_note = False
-            result = split_val(line)
+            result = _split_val(line)
+        elif line.startswith("[完成]") or line.startswith("[成功]") or line.startswith("[ok]") \
+                or line.startswith("[OK]"):
+            in_note = False
+            status = "done"
+            result = _split_val(line)
+        elif line.startswith("[失败]") or line.startswith("[错误]"):
+            in_note = False
+            status = "failed"
+            result = _split_val(line)
+        elif line.startswith("[需要确认]") or line.startswith("[确认]"):
+            in_note = False
+            status = "need_confirm"
+            result = _split_val(line)
         elif line.startswith("[备注]"):
             in_note = True
-            note_parts.append(split_val(line))
+            note_parts.append(_split_val(line))
         elif line.startswith("[摘要]"):
             in_note = False
-            summary = split_val(line)
+            summary = _split_val(line)
         elif in_note:
             note_parts.append(line.strip())
     if note_parts:
         note = "\n".join(p for p in note_parts if p)
     if status not in ("done", "failed", "need_confirm"):
-        return "failed", f"LLM 输出未遵循三态格式（缺 [状态] 标记）: {raw[:200]}", note, ""
+        # JSON 兜底：LLM 直接输出 {"status": ..., "result": ...}
+        j = _try_json(raw)
+        if j:
+            return j
+        # 宽容降级仅限"缺失状态"：有非空 [结果] 视为 done（真实 LLM 常漏状态行）；
+        # "未知状态"（明确输出了非标准值）仍 failed——更值得警惕。
+        if not status and result and result.strip():
+            status = "done"
+        else:
+            return "failed", f"LLM 输出未遵循三态格式（缺 [状态] 标记）: {raw[:200]}", note, ""
     if result is None:
         result = raw  # 有状态但缺 [结果] 行：退回原文（状态仍有效）
     return status, result, note, summary or ""
@@ -142,6 +213,37 @@ def validate_schema(data, schema: dict, max_depth: int = 20) -> list:
     return errors
 
 
+def _coerce_json(result: str):
+    """把 LLM 结果清洗为可校验数据：严格 JSON → 提取 JSON 片段 → 裸数字/布尔。
+
+    真实 LLM 常输出 '56088（通过工具计算）' 这类带杂质的字符串，
+    直接 json.loads 会失败——先提取核心值再校验。
+    """
+    result = (result or "").strip()
+    if not result:
+        return None
+    try:
+        return json.loads(result)
+    except json.JSONDecodeError:
+        pass
+    for opener, closer in (("{", "}"), ("[", "]")):
+        s, e = result.find(opener), result.rfind(closer)
+        if s >= 0 and e > s:
+            try:
+                return json.loads(result[s:e + 1])
+            except json.JSONDecodeError:
+                continue
+    if any(c.isdigit() for c in result):      # 裸数字（含 '56088（...）'）
+        try:
+            return float(result.replace(",", ""))
+        except ValueError:
+            try:
+                return float("".join(c for c in result if c.isdigit() or c in ".-"))
+            except ValueError:
+                return None
+    return None
+
+
 def _validate_with_retry(task: Task, status: str, result: str, note: str,
                          q: FileQueue, max_retries: int = 1):
     """结果 schema 校验；失败时把校验错误反馈给 LLM 重试（有次数上限）。
@@ -152,11 +254,11 @@ def _validate_with_retry(task: Task, status: str, result: str, note: str,
     """
     attempts = 0
     while True:
-        try:
-            data = json.loads(result)
-            errs = validate_schema(data, task.result_schema)
-        except json.JSONDecodeError:
+        data = _coerce_json(result)
+        if data is None:
             errs = ["结果不是合法 JSON"]
+        else:
+            errs = validate_schema(data, task.result_schema)
         if not errs:
             return status, result, note, "ok"
         if attempts >= max_retries:

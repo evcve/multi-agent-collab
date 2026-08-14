@@ -258,3 +258,11 @@ def test_multiline_note_supported():
         "[状态] done\n[结果] 完成\n[备注] 第一行\n第二行\n第三行")
     assert s == "done"
     assert note == "第一行\n第二行\n第三行"
+
+
+def test_parse_no_indexerror_on_bare_marker():
+    """智谱 P0：`[状态]` 无内容行不能 IndexError 崩溃，应安全解析为 failed。"""
+    s, r, _ = parse_three_state("[状态]\n[结果]")
+    assert s == "failed"            # 空状态 → failed
+    s2, _, _ = parse_three_state("[状态] done\n[结果]")   # [结果] 无内容
+    assert s2 == "done"             # 状态有效，结果回退原文

@@ -58,16 +58,21 @@ def parse_three_state(raw: str) -> tuple[str, str, str]:
     lines = raw.splitlines()
     in_note = False
     note_parts = []
+
+    def split_val(line: str) -> str:
+        """'[状态] xxx' -> 'xxx'；'[状态]'（无内容）-> ''（防 IndexError）。"""
+        return line.split("]", 1)[1].strip() if "]" in line else ""
+
     for line in lines:
         if line.startswith("[状态]"):
             in_note = False
-            status = line.split("]", 1)[1].strip().lower()
+            status = split_val(line).lower()
         elif line.startswith("[结果]"):
             in_note = False
-            result = line.split("]", 1)[1].strip()
+            result = split_val(line)
         elif line.startswith("[备注]"):
             in_note = True
-            note_parts.append(line.split("]", 1)[1].strip())
+            note_parts.append(split_val(line))
         elif in_note:
             note_parts.append(line.strip())
     if note_parts:

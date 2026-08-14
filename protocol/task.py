@@ -40,7 +40,8 @@ class Task:
         if self.acceptance:
             parts.append(f"【验收标准】{self.acceptance}")
         if self.result_schema is not None:
-            parts.append("【输出要求】[结果] 必须是合法 JSON，且通过以下 schema 校验：\n"
+            parts.append("【输出要求】[结果] 必须是合法 JSON；校验仅覆盖数据类型与必填字段"
+                         "（不支持 pattern/enum/minLength 等高级约束）：\n"
                          f"{json.dumps(self.result_schema, ensure_ascii=False)}")
         parts.append("【反馈格式】按以下三态输出：\n"
                      "[状态] done / failed / need_confirm\n"

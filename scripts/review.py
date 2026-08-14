@@ -16,8 +16,19 @@ import sys
 import urllib.request
 
 BASE_URL = os.environ.get("REVIEW_BASE_URL", "https://api.moonshot.cn/v1")
-API_KEY = os.environ.get("REVIEW_API_KEY") or os.environ.get("KIMI_API_KEY", "")
 MODEL = os.environ.get("REVIEW_MODEL", "kimi-k2.7-code-highspeed")
+
+
+def resolve_api_key(base_url: str) -> str:
+    """按端点自动选择对应 provider 的 key（REVIEW_API_KEY 显式覆盖优先）。"""
+    explicit = os.environ.get("REVIEW_API_KEY")
+    if explicit:
+        return explicit
+    if "bigmodel" in base_url:          # 智谱
+        return os.environ.get("ZHIPUAI_API_KEY", "")
+    if "moonshot" in base_url:          # Kimi
+        return os.environ.get("KIMI_API_KEY", "")
+    return os.environ.get("OPENAI_API_KEY", "")
 
 SYSTEM_PROMPT = (
     "你是一名严格的独立代码评审员（第三方视角，与项目作者无关）。"
@@ -35,27 +46,34 @@ SYSTEM_PROMPT = (
 
 
 def call_llm(prompt: str, timeout: int = 180) -> str:
-    if not API_KEY:
-        print("错误: 未设置 KIMI_API_KEY（或 REVIEW_API_KEY）环境变量", file=sys.stderr)
+    api_key = resolve_api_key(BASE_URL)
+    if not api_key:
+        print("错误: 未设置对应 provider 的 API key"
+              "（智谱: ZHIPUAI_API_KEY / Kimi: KIMI_API_KEY / 或 REVIEW_API_KEY 覆盖）",
+              file=sys.stderr)
         sys.exit(1)
+    # temperature 按 provider：Kimi 推理模型只允许 1.0；智谱结构化输出用 0.3 更稳
+    temperature = 1.0 if "moonshot" in BASE_URL else 0.3
     body = json.dumps({
         "model": MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 1.0,  # kimi 推理模型(k2.7-code)只允许 temperature=1
+        "temperature": temperature,
         "max_tokens": 8000,  # 推理模型 thinking 会吃 token，给足否则 content 为空
     }).encode("utf-8")
     req = urllib.request.Request(f"{BASE_URL}/chat/completions", data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {API_KEY}")
+    req.add_header("Authorization", f"Bearer {api_key}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     msg = data["choices"][0]["message"]
     content = (msg.get("content") or "").strip()
-    if not content:  # 推理模型 thinking 吃光 token 时 content 为空，回退 reasoning
-        content = (msg.get("reasoning_content") or "").strip()
+    if not content:
+        # 不回退 reasoning_content（那是思维链，不是结构化输出）；诚实报错
+        raise RuntimeError(
+            "模型返回空 content（reasoning 吃光 max_tokens？）——请调大 REVIEW_MAX_TOKENS 或换模型")
     return content
 
 

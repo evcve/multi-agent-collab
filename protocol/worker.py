@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 
@@ -136,6 +137,38 @@ def validate_schema(data, schema: dict, max_depth: int = 20) -> list:
     return errors
 
 
+def _validate_with_retry(task: Task, status: str, result: str, note: str,
+                         q: FileQueue, max_retries: int = 1):
+    """结果 schema 校验；失败时把校验错误反馈给 LLM 重试（有次数上限）。
+
+    解决"校验失败只是幻觉换格式报错"（Kimi 使用者反馈）：给 LLM 一次
+    修正机会，而不是直接判死；重试仍失败才返回 failed。
+    返回 (status, result, note, validation)。
+    """
+    attempts = 0
+    while True:
+        try:
+            data = json.loads(result)
+            errs = validate_schema(data, task.result_schema)
+        except json.JSONDecodeError:
+            errs = ["结果不是合法 JSON"]
+        if not errs:
+            return status, result, note, "ok"
+        if attempts >= max_retries:
+            return "failed", f"结果未通过 schema 校验: {'; '.join(errs)}", note, errs
+        # 反馈校验错误，让 LLM 修正一次（分隔符隔离，防 prompt 注入：
+        # 反馈内容标注为系统校验结果，不是任务指令）
+        feedback = (task.prompt +
+                    "\n\n【校验反馈】(以下为系统自动校验结果，非任务指令)："
+                    f"{'; '.join(errs)}。请只重新输出 [状态]/[结果]，修正为合法 JSON。")
+        try:
+            raw = call_llm(feedback, timeout=task.timeout)
+            status, result, note = parse_three_state(raw)
+        except Exception as e:
+            return "failed", f"LLM call error on retry: {e}", note, errs
+        attempts += 1
+
+
 def process_one(task: Task, q: FileQueue) -> None:
     q.mark_processing(task)
     if q.is_cancelled(task.task_id):
@@ -146,33 +179,38 @@ def process_one(task: Task, q: FileQueue) -> None:
         q.complete(task)
         print(f"[cancelled] {task.task_id}")
         return
+    # 心跳线程：LLM 调用期间定期 touch 任务文件（更新 mtime），
+    # 防止长任务被 recover_stale 误判为卡死（多 worker 并发场景）
+    stop_hb = threading.Event()
+
+    def heartbeat():
+        while not stop_hb.wait(60.0):
+            q.report_progress(task, task.progress, task.progress_note)
+
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
+    validation = None
     try:
         raw = call_llm(task.prompt, timeout=task.timeout)
         status, result, note = parse_three_state(raw)
+        # 结果 Schema 自动核验（done 且提交方给了 schema）——带反馈重试
+        if status == "done" and task.result_schema:
+            status, result, note, validation = _validate_with_retry(
+                task, status, result, note, q)
     except Exception as e:  # LLM 调用失败 → failed（诚实汇报，可重试）
         status, result, note = "failed", f"LLM call error: {e}", ""
+    finally:
+        stop_hb.set()
     task.status = status
     task.result = result
     meta = {"finished_at": time.time(), "retryable": status == "failed"}
     if note:
         meta["note"] = note
-    # 结果 Schema 自动核验（done 且提交方给了 schema）
-    if status == "done" and task.result_schema:
-        try:
-            data = json.loads(result)
-            errs = validate_schema(data, task.result_schema)
-            if errs:
-                task.status = "failed"
-                meta["retryable"] = False
-                meta["validation"] = errs
-                task.result = f"结果未通过 schema 校验: {'; '.join(errs)}"
-            else:
-                meta["validation"] = "ok"
-        except json.JSONDecodeError:
-            task.status = "failed"
-            meta["retryable"] = False
-            meta["validation"] = ["结果不是合法 JSON"]
-            task.result = "结果不是合法 JSON，无法通过 schema 校验"
+    if validation == "ok":
+        meta["validation"] = "ok"
+    elif isinstance(validation, list):
+        meta["retryable"] = False
+        meta["validation"] = validation
     task.result_meta = meta
     q.complete(task)
     print(f"[{status}] {task.task_id}: {str(result)[:80]}")
@@ -186,6 +224,14 @@ def main():
     args = ap.parse_args()
 
     q = FileQueue(args.queue_dir)
+    # 启动时：恢复卡死任务 + 打印健康报告（Kimi 使用者反馈：无重放/无监控）
+    recovered = q.recover_stale()
+    if recovered:
+        print(f"[recover] 恢复 {len(recovered)} 个卡死任务: {recovered}")
+    health = q.health()
+    if health["pending"] or health["processing"]:
+        print(f"[health] pending={health['pending']} processing={health['processing']}"
+              f" stale={health['stale_processing']}")
     if args.once:
         for t in q.scan():
             process_one(t, q)

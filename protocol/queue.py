@@ -114,6 +114,50 @@ class FileQueue:
         task.progress_note = note
         self._write_queue(task)
 
+    def _iter_tasks(self):
+        """遍历队列目录的任务文件，产出 (task_id, Task, path)。"""
+        for fn in sorted(os.listdir(self.queue_dir)):
+            if not fn.endswith(".json"):
+                continue
+            path = os.path.join(self.queue_dir, fn)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    yield fn[:-5], Task.from_dict(json.load(f)), path
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    def recover_stale(self, stale_after: float = 300.0) -> list:
+        """崩溃恢复：把卡死的 processing 任务重置为 pending（重放）。
+
+        判据：任务文件 mtime（= 最后一次心跳/写入时间）超过 stale_after 秒
+        且状态为 processing → 视为 worker 已崩溃，重置 pending 让其他 worker 接手。
+        worker 侧有心跳线程定期更新 mtime，长任务不会被误判。
+        注意：不重置 progress 字段（业务层自行决定是否断点续算）。
+        """
+        recovered = []
+        now = time.time()
+        for task_id, t, path in self._iter_tasks():
+            if t.status == "processing" and (now - os.path.getmtime(path)) > stale_after:
+                t.status = "pending"
+                self._write_queue(t)
+                recovered.append(task_id)
+        return recovered
+
+    def health(self, stale_after: float = 300.0) -> dict:
+        """队列健康报告：pending/processing 计数 + 卡死任务清单。"""
+        pending = processing = 0
+        stale = []
+        now = time.time()
+        for task_id, t, path in self._iter_tasks():
+            if t.status == "processing":
+                processing += 1
+                if (now - os.path.getmtime(path)) > stale_after:
+                    stale.append(task_id)
+            elif t.status == "pending":
+                pending += 1
+        return {"pending": pending, "processing": processing,
+                "stale_processing": stale}
+
     def mark_processing(self, task: Task):
         task.status = "processing"
         self._write_queue(task)

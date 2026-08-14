@@ -1,6 +1,7 @@
 """protocol 单元测试：Task 结构、三态解析、文件队列闭环。"""
 import os
 import sys
+import time
 
 import pytest
 
@@ -266,3 +267,78 @@ def test_parse_no_indexerror_on_bare_marker():
     assert s == "failed"            # 空状态 → failed
     s2, _, _ = parse_three_state("[状态] done\n[结果]")   # [结果] 无内容
     assert s2 == "done"             # 状态有效，结果回退原文
+
+
+# ── Kimi 使用者反馈优化：崩溃恢复 / schema 重试 / 健康检查 ──────
+def test_recover_stale_resets_processing(tmp_path):
+    """Kimi：crash 即丢消息 → 卡死 processing 任务应能重放。"""
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g")
+    q.submit(t)
+    q.mark_processing(t)                       # 模拟 worker 取走
+    path = os.path.join(q.queue_dir, f"{t.task_id}.json")
+    old = time.time() - 9999                   # 把 mtime 改老 → 视为卡死
+    os.utime(path, (old, old))
+    recovered = q.recover_stale(stale_after=300)
+    assert t.task_id in recovered
+    tasks = q.scan()
+    assert len(tasks) == 1 and tasks[0].status == "pending"
+
+
+def test_recover_stale_keeps_fresh_processing(tmp_path):
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g")
+    q.submit(t)
+    q.mark_processing(t)                       # mtime 是新的 → 不算卡死
+    assert q.recover_stale(stale_after=300) == []
+
+
+def test_health_report(tmp_path):
+    q = FileQueue(str(tmp_path))
+    t1 = Task(goal="a")
+    t2 = Task(goal="b")
+    q.submit(t1)
+    q.submit(t2)
+    q.mark_processing(t2)
+    h = q.health(stale_after=300)
+    assert h["pending"] == 1 and h["processing"] == 1
+    assert h["stale_processing"] == []
+
+
+def test_schema_retry_fixes_output(tmp_path, monkeypatch):
+    """Kimi：校验失败不是直接判死——反馈给 LLM 重试，修正后应 done。"""
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g", result_schema={
+        "type": "object", "required": ["x"],
+        "properties": {"x": {"type": "integer"}}})
+    q.submit(t)
+    calls = []
+    def fake(prompt, **kw):
+        calls.append(prompt)
+        if len(calls) == 1:      # 第一次：错误输出
+            return '[状态] done\n[结果] {"x": "not-int"}'
+        return '[状态] done\n[结果] {"x": 42}'   # 反馈后修正
+    monkeypatch.setattr("protocol.worker.call_llm", fake)
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "done"
+    assert got.result_meta.get("validation") == "ok"
+    assert len(calls) == 2       # 确认发生了一次反馈重试
+
+
+def test_schema_retry_gives_up_after_limit(tmp_path, monkeypatch):
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g", result_schema={
+        "type": "object", "required": ["x"],
+        "properties": {"x": {"type": "integer"}}})
+    q.submit(t)
+    def fake(prompt, **kw):
+        return '[状态] done\n[结果] {"x": "still-bad"}'
+    monkeypatch.setattr("protocol.worker.call_llm", fake)
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "failed"
+    assert got.result_meta.get("retryable") is False
+    assert "schema" in got.result

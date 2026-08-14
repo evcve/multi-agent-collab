@@ -216,6 +216,7 @@ def test_concurrent_batch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(W, "call_llm", fake)
     done_ids = []
+    done_lock = threading.Lock()
 
     def run():
         while True:
@@ -225,7 +226,8 @@ def test_concurrent_batch(tmp_path, monkeypatch):
             for task in tasks:
                 process_one(task, q)
                 if task.status == "done":
-                    done_ids.append(task.task_id)
+                    with done_lock:
+                        done_ids.append(task.task_id)
 
     ths = [threading.Thread(target=run) for _ in range(2)]
     for th in ths:

@@ -87,17 +87,15 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
         try:
             return _once()
         except (_uerror.HTTPError, _uerror.URLError, TimeoutError, OSError) as e:
-            # 仅 429/5xx/网络类可重试
+            # 仅 408/429/5xx/网络类可重试
             retryable = True
-            if isinstance(e, _uerror.HTTPError) and e.code not in (429, 500, 502, 503, 504):
+            if isinstance(e, _uerror.HTTPError) and e.code not in (408, 429, 500, 502, 503, 504):
                 retryable = False
-            last_err = e
             if not retryable or attempt == 2:
                 raise
             _t.sleep(2 * (attempt + 1))
-        except Exception as e:
+        except Exception:
             raise
-    raise last_err if last_err else RuntimeError("LLM 调用失败")
 
 
 STATUS_ALIASES = {

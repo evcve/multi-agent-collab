@@ -274,10 +274,6 @@ class FileQueue:
                            task.to_dict())
         self.release(task.task_id)   # 删 processing 文件（结果已落盘）
         try:
-            os.unlink(os.path.join(self.queue_dir, f"{task.task_id}.json"))
-        except OSError:
-            pass
-        try:
             os.unlink(os.path.join(self.cancel_dir, f"{task.task_id}.marker"))
         except OSError:
             pass
@@ -292,14 +288,13 @@ class FileQueue:
         """写任务文件到其当前所在目录（processing/ 优先，否则 queue/）。
 
         claim 后任务在 processing/，写错目录会留幽灵文件。
+        文件都不存在 = 任务已完成（结果已落盘）→ 不复活（防 completed 任务复活）。
         """
         for d in (self.processing_dir, self.queue_dir):
             p = os.path.join(d, f"{task.task_id}.json")
             if os.path.exists(p):
                 self._atomic_write(p, task.to_dict())
                 return
-        self._atomic_write(os.path.join(self.queue_dir, f"{task.task_id}.json"),
-                           task.to_dict())
 
     def _write_queue(self, task: Task):
         self._atomic_write(os.path.join(self.queue_dir, f"{task.task_id}.json"),

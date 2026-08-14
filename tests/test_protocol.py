@@ -77,10 +77,11 @@ def test_queue_roundtrip(tmp_path):
     t = Task(goal="g")
     q.submit(t)
     assert len(q.scan()) == 1
+    assert q.claim(t.task_id)    # worker 原子认领（真实流程）
 
     t.status = "done"
     t.result = "42"
-    q.complete(t)          # worker 写结果 + 删队列文件
+    q.complete(t)          # worker 写结果 + 清理
     assert len(q.scan()) == 0
 
     got = q.wait_result(t.task_id, timeout=5)

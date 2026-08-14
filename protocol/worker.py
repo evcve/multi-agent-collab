@@ -48,15 +48,21 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
 
 
 def parse_three_state(raw: str) -> tuple[str, str]:
-    """解析 [状态] done/failed/need_confirm + [结果] 内容。"""
-    status, result = "done", raw
+    """解析 [状态] done/failed/need_confirm + [结果] 内容。
+
+    防误报：未找到合法的 [状态] 标记 → 返回 failed（格式偏差绝不能静默降级为 done，
+    否则"防幻觉"协议自己会幻觉成功）。
+    """
+    status, result = None, None
     for line in raw.splitlines():
         if line.startswith("[状态]"):
-            s = line.split("]", 1)[1].strip().lower()
-            if s in ("done", "failed", "need_confirm"):
-                status = s
+            status = line.split("]", 1)[1].strip().lower()
         elif line.startswith("[结果]"):
             result = line.split("]", 1)[1].strip()
+    if status not in ("done", "failed", "need_confirm"):
+        return "failed", f"LLM 输出未遵循三态格式（缺 [状态] 标记）: {raw[:200]}"
+    if result is None:
+        result = raw  # 有状态但缺 [结果] 行：退回原文（状态仍有效）
     return status, result
 
 

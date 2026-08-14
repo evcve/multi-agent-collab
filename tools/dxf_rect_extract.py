@@ -65,10 +65,31 @@ def extract_lines(pairs, start, end):
     return lines
 
 
-def cluster_bands(lines, tol=0.5):
-    """Cluster orthogonal lines into bands.
+def pair_into_bands(coords: dict, max_gap: float = 60.0) -> list:
+    """把平行线坐标配对成条带：相邻两线（间距 <= max_gap）合并为一个条带。
 
-    Horizontal lines (y1≈y2) at same Y -> band; vertical lines (x1≈x2) -> band.
+    coords: {位置: [span_lo, span_hi]}（位置=横线的Y或竖线的X）
+    返回: [(lo, hi), ...] 条带边界（lo/hi = 两线位置，即条带宽度方向边界）
+    """
+    items = sorted(coords.items())
+    bands = []
+    i = 0
+    while i < len(items):
+        if i + 1 < len(items) and (items[i + 1][0] - items[i][0]) <= max_gap:
+            p1, p2 = items[i][0], items[i + 1][0]
+            bands.append((min(p1, p2), max(p1, p2)))
+            i += 2
+        else:  # 未配对的单线：视为零宽条带（仍可参与检测）
+            p = items[i][0]
+            bands.append((p, p))
+            i += 1
+    return bands
+
+
+def cluster_bands(lines, tol=0.5, max_gap=60.0):
+    """把正交线段聚类成条带（两条平行线配对 = 一个 40mm 宽条带）。
+
+    Horizontal lines (y1≈y2) at adjacent Y -> band; vertical lines (x1≈x2) -> band.
     """
     h_lines = {}  # y -> [xmin, xmax]
     v_lines = {}  # x -> [ymin, ymax]
@@ -101,10 +122,12 @@ def main():
     h_lines, v_lines = cluster_bands(lines)
 
     bands = []
-    for i, (y, (lo, hi)) in enumerate(sorted(h_lines.items()), 1):
-        bands.append({"dir": "X", "name": f"H{i}", "lo": lo, "hi": hi, "center": y})
-    for i, (x, (lo, hi)) in enumerate(sorted(v_lines.items()), 1):
-        bands.append({"dir": "Y", "name": f"V{i}", "lo": lo, "hi": hi, "center": x})
+    for i, (lo, hi) in enumerate(pair_into_bands(h_lines), 1):
+        bands.append({"dir": "X", "name": f"H{i}", "lo": lo, "hi": hi,
+                      "center": round((lo + hi) / 2, 3)})
+    for i, (lo, hi) in enumerate(pair_into_bands(v_lines), 1):
+        bands.append({"dir": "Y", "name": f"V{i}", "lo": lo, "hi": hi,
+                      "center": round((lo + hi) / 2, 3)})
 
     print(json.dumps(bands, indent=2))
     print(f"# {len(lines)} lines -> {len(bands)} bands", file=sys.stderr)

@@ -1,64 +1,90 @@
 # multi-agent-collab
 
-**Multi-agent collaboration playbook & toolkit** — 一套经过实战验证的多智能体协作模式与配套工程工具。
+**A battle-tested multi-agent collaboration playbook + runnable protocol + engineering tools.**
 
-> 来源：一个真实项目（卫星总体设计 + 多 AI 协作者）中，Hermes（大脑）与 OpenClaw 主代理（手脚）通过 MCP bridge 长期协作沉淀的**实战经验记录**。已去除所有内部数据，保留通用模式与可复用工具。
+> Source: a real production project (satellite bus design with multiple AI collaborators) where a
+> brain agent (Hermes) and an orchestrator agent (OpenClaw) worked together over an MCP bridge.
+> All internal data removed; only the general patterns and reusable tooling remain.
 >
-> 免责声明：本仓库为独立维护的个人项目，与 OpenClaw、CrewAI 等任何第三方产品或项目无隶属关系。文档中提及的产品名称仅用于事实性描述。
+> Disclaimer: this is an independent personal project, not affiliated with OpenClaw, CrewAI or any
+> third-party product. Product names are mentioned for factual description only.
 
-## 核心思想：三层分工
+## Core idea: three-tier division of labor
 
 ```
 ┌─────────────────────────────────────────────┐
-│  BRAIN  (Hermes / 主控 agent)                │
-│  意图拆解 · 记忆/知识管理 · 任务派发          │
-│  结果核验 · 人类接口                         │
+│  BRAIN  (main controller agent)             │
+│  intent decomposition · memory/knowledge    │
+│  task dispatch · result verification · UI   │
 ├─────────────────────────────────────────────┤
-│  HANDS  (Orchestrator agent, e.g. OpenClaw)  │
-│  多步推理 · 工具编排 · 复杂任务执行           │
+│  HANDS  (orchestrator agent, e.g. OpenClaw) │
+│  multi-step reasoning · tool orchestration  │
 ├─────────────────────────────────────────────┤
-│  WORKERS (子模型 / servant)                  │
-│  单轮生成 · 简单验证 · 格式化输出             │
+│  WORKERS (sub-models / servants)            │
+│  single-turn generation · simple validation │
 └─────────────────────────────────────────────┘
-        通道: MCP bridge / 队列 / 消息群
+        channel: MCP bridge / file queue / messaging
 ```
 
-## 仓库内容
+## Repository layout
 
-| 路径 | 内容 |
+| Path | What |
 |---|---|
-| [`COLLABORATION.md`](COLLABORATION.md) | 协作模式协议：任务四要素、三态反馈、心跳/中断、成本分级、纪律 |
-| [`protocol/`](protocol/) | **协作通讯主程序（可运行）**：文件队列 + worker + 三态反馈，纯 stdlib，任何 OpenAI 兼容 LLM 可用 |
-| [`tools/`](tools/) | 工程工具：DXF 几何解析、FEM 安装孔提取、干涉检测（通用，含示例数据） |
-| `examples/` | 示例数据（非真实项目数据） |
+| [`COLLABORATION.md`](COLLABORATION.md) | Collaboration protocol: 4-element task spec, 3-state feedback, heartbeat/interrupt, cost tiers, discipline |
+| [`protocol/`](protocol/) | **Runnable communication program**: file queue + worker + 3-state feedback. Pure stdlib, works with any OpenAI-compatible LLM |
+| [`tools/`](tools/) | Engineering tools: DXF band extraction, FEM RBE2 mount-hole extraction, interference checking (domain-agnostic, sample data included) |
+| `examples/` | Synthetic sample data (no real project data) |
 
-## 快速开始
+## Quick start
 
 ```bash
-# 1. 跑通协作通讯协议（无需 API key，模拟 worker）
+# 1. Run the collaboration protocol (no API key needed, simulated worker)
 python -m protocol.demo --fake
 
-# 2. 真实 LLM（OpenAI 兼容端点）
+# 2. With a real LLM (OpenAI-compatible endpoint)
 export LLM_BASE_URL=https://api.deepseek.com/v1
 export LLM_API_KEY=sk-xxx
 python -m protocol.demo
 
-# 3. 常驻 worker（独立进程消费队列）
+# 3. Persistent worker (separate process consuming the queue)
 python -m protocol.worker --queue-dir ./runtime
 
-# 4. 工具示例：DXF 条带提取 / FEM 安装孔 / 干涉检测
+# 4. Layout tools
 python tools/dxf_rect_extract.py examples/sample_bands.dxf
-python tools/fem_rbe2_holes.py examples/sample_model.fem --nodes 45,44,43
+python tools/fem_rbe2_holes.py examples/sample_model.fem --nodes 13,31,45
 python tools/interference_check.py --holes examples/sample_holes.csv --bands examples/sample_bands.csv
 ```
 
-## 为什么值得看
+## Why this is worth a look
 
-- **原创的协作协议**：任务四要素（目标/上下文内嵌/约束/验收）解决了"子代理编造文件"的经典问题（执行层无文件能力时，指令"读文件"必然被幻觉填补 → 关键数据必须内嵌任务文本）
-- **结构化反馈**：done/failed/need_confirm 三态 + 可验证路径，取代自然语言汇报
-- **成本治理**：免费模型层兜底简单任务，主力模型执行，视觉模型专项——配额耗尽时自动降级
-- **实战教训固化**：文件操作归脚本（LLM 只做推理）、数值必须回源核验、长任务分块防上下文溢出
+- **A collaboration protocol born from real failures**, not a marketing playbook:
+  - **Task 4 elements** (goal / context / constraints / acceptance) with **data embedded in the prompt** —
+    when the executing LLM has no file access, "please read file X" is *guaranteed* to be
+    hallucinated. Embedding data is the only reliable channel (field-tested).
+  - **3-state structured feedback** (`done` with verifiable handle / `failed` with reason /
+    `need_confirm` with options) replaces free-text reporting that hides failures.
+  - **Anti-hallucination discipline**: uncertain → say so; never fabricate files, numbers, or results.
+- **Runnable minimal kernel** (`protocol/`): file queue + worker in pure stdlib — zero framework
+  weight, interoperable across languages/processes (JSON files are the protocol).
+- **Cost governance**: free model tier for simple tasks, main model for execution, vision model for
+  image work — with automatic downgrade when quotas run out (also field-tested).
+- **Honest failure**: LLM call errors → `failed`, never a faked success; output that doesn't follow
+  the 3-state format is rejected as `failed`, not silently treated as done.
+- **Engineering tools with the footguns documented**: Nastran fixed-column parsing (adjacent numbers
+  glued together), RBE2 continuation lines, tonne-vs-kg mass units.
+
+## Tests & CI
+
+```bash
+pip install pytest
+python -m pytest tests/ -v    # 19 tests: protocol (task/queue/3-state) + tools (DXF/FEM/interference)
+```
+
+GitHub Actions CI runs the suite on Python 3.9–3.12 (`.github/workflows/ci.yml`).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+---
+*中文版：[README.zh-CN.md](README.zh-CN.md) · Protocol 文档：[protocol/README.md](protocol/README.md)*

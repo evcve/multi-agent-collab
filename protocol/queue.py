@@ -82,16 +82,20 @@ class FileQueue:
         self._write_queue(task)
 
     def complete(self, task: Task):
-        """写结果文件并删队列文件。"""
-        with open(os.path.join(self.results_dir, f"{task.task_id}.json"),
-                  "w", encoding="utf-8") as f:
+        """写结果文件并删队列文件（原子写：临时文件 + os.replace，防并发读半截）。"""
+        result_path = os.path.join(self.results_dir, f"{task.task_id}.json")
+        tmp_path = result_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(task.to_dict(), f, ensure_ascii=False)
+        os.replace(tmp_path, result_path)   # 原子替换
         try:
             os.unlink(os.path.join(self.queue_dir, f"{task.task_id}.json"))
         except OSError:
             pass
 
     def _write_queue(self, task: Task):
-        with open(os.path.join(self.queue_dir, f"{task.task_id}.json"),
-                  "w", encoding="utf-8") as f:
+        path = os.path.join(self.queue_dir, f"{task.task_id}.json")
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(task.to_dict(), f, ensure_ascii=False)
+        os.replace(tmp_path, path)

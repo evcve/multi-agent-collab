@@ -52,7 +52,10 @@ def parse(fem_path):
         elif s.startswith("CONM2"):
             try:
                 g = int(field(s, 1))
-                m = float(field(s, 3)) if field(s, 3) else 0.0
+                if field(s, 2):          # 带 CID：M 在字段 4
+                    m = float(field(s, 4)) if field(s, 4) else 0.0
+                else:                    # 无 CID：M 在字段 3
+                    m = float(field(s, 3)) if field(s, 3) else 0.0
                 conm2[g] = m
             except ValueError:
                 pass

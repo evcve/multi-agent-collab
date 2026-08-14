@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent-collab"
+version = "0.1.0"
+description = "Multi-agent collaboration playbook, runnable protocol, and layout-checking tools"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["multi-agent", "llm", "orchestration", "queue", "dxf", "fem"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7,<9"]
+
+[tool.setuptools.packages.find]
+include = ["protocol*", "tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

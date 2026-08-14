@@ -119,7 +119,10 @@ class FileQueue:
         self._write_queue(task)
 
     def complete(self, task: Task):
-        """写结果文件并删队列文件（原子写：临时文件 + os.replace，防并发读半截）。"""
+        """写结果文件并删队列文件（原子写：临时文件 + os.replace，防并发读半截）。
+
+        同时清理该任务的取消标记（避免 cancel 目录无限增长）。
+        """
         result_path = os.path.join(self.results_dir, f"{task.task_id}.json")
         tmp_path = result_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -127,6 +130,10 @@ class FileQueue:
         os.replace(tmp_path, result_path)   # 原子替换
         try:
             os.unlink(os.path.join(self.queue_dir, f"{task.task_id}.json"))
+        except OSError:
+            pass
+        try:
+            os.unlink(os.path.join(self.cancel_dir, f"{task.task_id}.marker"))
         except OSError:
             pass
 

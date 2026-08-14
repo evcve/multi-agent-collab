@@ -199,3 +199,62 @@ def test_retryable_flag_on_llm_error(tmp_path, monkeypatch):
     got = q.wait_result(t.task_id, timeout=5)
     assert got.status == "failed"
     assert got.result_meta.get("retryable") is True   # LLM 调用错误 → 可重试
+
+
+# ── 第三方评审(Kimi)意见修复的回归测试 ──────────────────────────
+def test_schema_announced_in_prompt():
+    """Kimi P1：result_schema 必须进 prompt，LLM 才知道输出 JSON。"""
+    t = Task(goal="g", result_schema={"type": "object", "required": ["x"]})
+    assert "【输出要求】" in t.prompt
+    assert '"required"' in t.prompt
+
+
+def test_validate_schema_integer_and_null():
+    from protocol.worker import validate_schema
+    assert validate_schema(3, {"type": "integer"}) == []
+    assert validate_schema(3.5, {"type": "integer"}) != []     # float 不是 integer
+    assert validate_schema(True, {"type": "integer"}) != []    # bool 不是 integer
+    assert validate_schema(None, {"type": "null"}) == []
+    assert validate_schema(0, {"type": "null"}) != []
+
+
+def test_validate_schema_recursion_limit():
+    """Kimi P1：深嵌套 schema+数据必须被深度上限拦截（防 DoS）。"""
+    from protocol.worker import validate_schema
+    # 构造 30 层深的 schema 和 30 层深的数据
+    deep_schema = {"type": "object", "properties": {}}
+    deep_data = {}
+    cur_s, cur_d = deep_schema, deep_data
+    for _ in range(30):
+        cur_s["properties"] = {"n": {"type": "object", "properties": {}}}
+        cur_d["n"] = {}
+        cur_s, cur_d = cur_s["properties"]["n"], cur_d["n"]
+    errs = validate_schema(deep_data, deep_schema)
+    assert any("深度上限" in e for e in errs)
+
+
+def test_validate_schema_unknown_type_reports_error():
+    """Kimi P1：不支持的 type 显式报错，不静默通过。"""
+    from protocol.worker import validate_schema
+    assert validate_schema("x", {"type": "anyOf"}) != []
+
+
+def test_cancel_marker_cleaned_on_complete(tmp_path):
+    """Kimi P1：任务完成后 cancel marker 必须清理，防目录无限增长。"""
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g")
+    q.submit(t)
+    q.cancel(t.task_id)
+    assert q.is_cancelled(t.task_id)
+    t.status = "failed"
+    t.result = "cancelled"
+    q.complete(t)
+    assert not q.is_cancelled(t.task_id)
+
+
+def test_multiline_note_supported():
+    """Kimi P1：备注应支持多行（自由文本语义）。"""
+    s, r, note = parse_three_state(
+        "[状态] done\n[结果] 完成\n[备注] 第一行\n第二行\n第三行")
+    assert s == "done"
+    assert note == "第一行\n第二行\n第三行"

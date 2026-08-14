@@ -3,6 +3,7 @@
 四要素：goal（目标）/ context（上下文，内嵌数据）/ constraints（约束）/ acceptance（验收标准）
 三态反馈：done（附可验证句柄）/ failed（附原因）/ need_confirm（附选项）
 """
+import json
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 import time
@@ -38,6 +39,9 @@ class Task:
             parts.append(f"【约束】{self.constraints}")
         if self.acceptance:
             parts.append(f"【验收标准】{self.acceptance}")
+        if self.result_schema is not None:
+            parts.append("【输出要求】[结果] 必须是合法 JSON，且通过以下 schema 校验：\n"
+                         f"{json.dumps(self.result_schema, ensure_ascii=False)}")
         parts.append("【反馈格式】按以下三态输出：\n"
                      "[状态] done / failed / need_confirm\n"
                      "[结果] <内容>\n"

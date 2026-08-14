@@ -50,17 +50,28 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
 def parse_three_state(raw: str) -> tuple[str, str, str]:
     """解析 [状态] / [结果] / [备注]（备注不参与状态判断，供提交方参考）。
 
+    备注支持多行：`[备注]` 之后直到下一个 `[标记]` 或结尾的所有行都归入备注。
     防误报：未找到合法的 [状态] 标记 → 返回 failed（格式偏差绝不能静默降级为 done，
     否则"防幻觉"协议自己会幻觉成功）。
     """
     status, result, note = None, None, ""
-    for line in raw.splitlines():
+    lines = raw.splitlines()
+    in_note = False
+    note_parts = []
+    for line in lines:
         if line.startswith("[状态]"):
+            in_note = False
             status = line.split("]", 1)[1].strip().lower()
         elif line.startswith("[结果]"):
+            in_note = False
             result = line.split("]", 1)[1].strip()
         elif line.startswith("[备注]"):
-            note = line.split("]", 1)[1].strip()
+            in_note = True
+            note_parts.append(line.split("]", 1)[1].strip())
+        elif in_note:
+            note_parts.append(line.strip())
+    if note_parts:
+        note = "\n".join(p for p in note_parts if p)
     if status not in ("done", "failed", "need_confirm"):
         return "failed", f"LLM 输出未遵循三态格式（缺 [状态] 标记）: {raw[:200]}", note
     if result is None:
@@ -68,14 +79,18 @@ def parse_three_state(raw: str) -> tuple[str, str, str]:
     return status, result, note
 
 
-def validate_schema(data, schema: dict) -> list:
-    """迷你 JSON Schema 校验（stdlib only）：类型 + required + properties 递归。
+def validate_schema(data, schema: dict, max_depth: int = 20) -> list:
+    """迷你 JSON Schema 校验（stdlib only）：type/required/properties/items。
 
-    返回错误列表（空 = 通过）。仅支持 type/required/properties，够协议用。
+    返回错误列表（空 = 通过）。带递归深度上限（防 DoS）。
+    支持类型：object/array/string/number/integer/boolean/null。
     """
     errors = []
 
-    def check(value, sch, path):
+    def check(value, sch, path, depth):
+        if depth > max_depth:
+            errors.append(f"{path}: schema 嵌套超过深度上限 {max_depth}")
+            return
         t = sch.get("type")
         if t == "object":
             if not isinstance(value, dict):
@@ -86,24 +101,33 @@ def validate_schema(data, schema: dict) -> list:
                     errors.append(f"{path}.{k}: 缺少必填字段")
             for k, sub in sch.get("properties", {}).items():
                 if k in value:
-                    check(value[k], sub, f"{path}.{k}")
+                    check(value[k], sub, f"{path}.{k}", depth + 1)
         elif t == "array":
             if not isinstance(value, list):
                 errors.append(f"{path}: 期望 array，实际 {type(value).__name__}")
                 return
             for i, item in enumerate(value):
-                check(item, sch.get("items", {}), f"{path}[{i}]")
+                check(item, sch.get("items", {}), f"{path}[{i}]", depth + 1)
         elif t == "string":
             if not isinstance(value, str):
                 errors.append(f"{path}: 期望 string，实际 {type(value).__name__}")
         elif t == "number":
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 errors.append(f"{path}: 期望 number，实际 {type(value).__name__}")
+        elif t == "integer":
+            if not isinstance(value, int) or isinstance(value, bool):
+                errors.append(f"{path}: 期望 integer，实际 {type(value).__name__}")
         elif t == "boolean":
             if not isinstance(value, bool):
                 errors.append(f"{path}: 期望 boolean，实际 {type(value).__name__}")
+        elif t == "null":
+            if value is not None:
+                errors.append(f"{path}: 期望 null，实际 {type(value).__name__}")
+        else:
+            # 不支持的 type：显式报错而不是静默通过（防"以为校验了其实没有"）
+            errors.append(f"{path}: 不支持的 schema type: {t}")
 
-    check(data, schema, "$")
+    check(data, schema, "$", 0)
     return errors
 
 

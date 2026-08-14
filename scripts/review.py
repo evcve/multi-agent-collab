@@ -17,7 +17,7 @@ import urllib.request
 
 BASE_URL = os.environ.get("REVIEW_BASE_URL", "https://api.moonshot.cn/v1")
 API_KEY = os.environ.get("REVIEW_API_KEY") or os.environ.get("KIMI_API_KEY", "")
-MODEL = os.environ.get("REVIEW_MODEL", "kimi-k2")
+MODEL = os.environ.get("REVIEW_MODEL", "kimi-k2.7-code-highspeed")
 
 SYSTEM_PROMPT = (
     "你是一名严格的独立代码评审员（第三方视角，与项目作者无关）。"
@@ -44,15 +44,19 @@ def call_llm(prompt: str, timeout: int = 180) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.3,
-        "max_tokens": 4000,
+        "temperature": 1.0,  # kimi 推理模型(k2.7-code)只允许 temperature=1
+        "max_tokens": 8000,  # 推理模型 thinking 会吃 token，给足否则 content 为空
     }).encode("utf-8")
     req = urllib.request.Request(f"{BASE_URL}/chat/completions", data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", f"Bearer {API_KEY}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"].strip()
+    msg = data["choices"][0]["message"]
+    content = (msg.get("content") or "").strip()
+    if not content:  # 推理模型 thinking 吃光 token 时 content 为空，回退 reasoning
+        content = (msg.get("reasoning_content") or "").strip()
+    return content
 
 
 def main():
@@ -81,7 +85,7 @@ def main():
 
     print(f"评审中... (模型: {MODEL}, 端点: {BASE_URL})", file=sys.stderr)
     try:
-        result = call_llm("\n".join(parts))
+        result = call_llm("\n".join(parts), timeout=300)
     except Exception as e:
         print(f"评审调用失败: {e}", file=sys.stderr)
         sys.exit(1)

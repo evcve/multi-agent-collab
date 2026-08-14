@@ -1,4 +1,5 @@
 """protocol 单元测试：Task 结构、三态解析、文件队列闭环。"""
+import json
 import os
 import sys
 import time
@@ -340,3 +341,49 @@ def test_schema_retry_gives_up_after_limit(tmp_path, monkeypatch):
     assert got.status == "failed"
     assert got.result_meta.get("retryable") is False
     assert "schema" in got.result
+
+
+# ── 作战计划：S1 结构化字段 / B7 TTL 清理 / 真实用例 ───────────
+def test_context_fields_rendered_structured():
+    """S1：结构化字段以 key: value 块渲染，LLM 不用从散文里找。"""
+    t = Task(goal="g", context_fields={"温度": "45°C", "质量": "2.5kg"})
+    assert "【数据】" in t.prompt
+    assert "  温度: 45°C" in t.prompt
+    assert "  质量: 2.5kg" in t.prompt
+
+
+def test_context_fields_roundtrip_dict():
+    t = Task(goal="g", context_fields={"a": 1, "b": [2, 3]})
+    t2 = Task.from_dict(t.to_dict())
+    assert t2.context_fields == {"a": 1, "b": [2, 3]}
+
+
+def test_gc_removes_old_results(tmp_path):
+    """B7：TTL 清理删除过期结果文件。"""
+    q = FileQueue(str(tmp_path))
+    import time as _t
+    # 写两个结果文件，一个改老
+    r1 = os.path.join(q.results_dir, "old.json")
+    r2 = os.path.join(q.results_dir, "new.json")
+    with open(r1, "w") as f: f.write("{}")
+    with open(r2, "w") as f: f.write("{}")
+    old = _t.time() - 999999
+    os.utime(r1, (old, old))
+    removed = q.gc(ttl_days=1)
+    assert removed == 1
+    assert not os.path.exists(r1) and os.path.exists(r2)
+
+
+def test_layout_case_fake_engine_finds_conflicts():
+    """真实用例：fake 几何引擎正确检出冲突（5 个）。"""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "lc", os.path.join(os.path.dirname(__file__), "..", "examples", "layout_check_case.py"))
+    lc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lc)
+    raw = lc.fake_engine(lc.build_task().context_fields)
+    assert "[状态] done" in raw
+    data = json.loads(raw.split("[结果] ")[1].splitlines()[0])
+    assert data["total_holes"] == 7
+    assert len(data["conflicts"]) == 6   # EQ-A 孔0 同时撞 H2 和 V3 → 双命中

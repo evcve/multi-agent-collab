@@ -38,10 +38,10 @@
 | P1 | ~~心跳/进度~~ ✅ | B2 | report_progress() + wait_result(progress_callback=...) |
 | P1 | ~~取消协议~~ ✅ | B3 | FileQueue.cancel()/is_cancelled()；worker 执行前检查 |
 | P1 | ~~重试语义~~ ✅ | B4 | result_meta.retryable（LLM错误=可重试，业务失败/取消=否） |
-| P2 | 结构化数据字段 | S1 | context 支持 `字段名: 值` 块渲染（YAML-lite），非纯散文 |
+| P2 | ~~结构化数据字段~~ ✅ | S1 | Task.context_fields dict → 渲染为【数据】字段块 |
 | P2 | 白名单工具 | S3/B8 | worker 可配置 `ALLOWED_TOOLS`（如只读文件 glob/数学），默认空=纯文本 |
 | P2 | 上下文分块+摘要回传 | S4 | 长任务协议：subtask 列表，每完成一块回传 1 行摘要 |
-| P2 | 队列 TTL 清理 | B7 | FileQueue 提供 gc(ttl_days)；worker 启动时可选执行 |
+| P2 | ~~队列 TTL 清理~~ ✅ | B7 | FileQueue.gc(ttl_days) |
 
 ## 不做（明确 out of scope）
 

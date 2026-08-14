@@ -175,6 +175,28 @@ class FileQueue:
         return {"pending": pending, "processing": processing,
                 "stale_processing": stale}
 
+    def gc(self, ttl_days: float = 7.0) -> int:
+        """TTL 清理：删除 results/ 下超过 ttl_days 未动的结果文件（防堆积）。
+
+        返回清理数量。语义：结果文件是"已消费即删"的，残留说明提交方没读——
+        gc 清的是这些孤儿结果，不含 queue/（pending 任务不能删、processing 由
+        recover_stale 管）。注意与 wait_result 的竞态窗口极小（正在读的结果
+        mtime 通常是新的），如遇误删可将 ttl_days 调大。
+        """
+        removed = 0
+        cutoff = time.time() - ttl_days * 86400
+        for fn in os.listdir(self.results_dir):
+            if not fn.endswith(".json"):
+                continue
+            path = os.path.join(self.results_dir, fn)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.unlink(path)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
+
     def mark_processing(self, task: Task):
         task.status = "processing"
         self._write_queue(task)

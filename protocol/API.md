@@ -24,7 +24,8 @@ Task(goal: str,
 | Field | Type | Meaning |
 |---|---|---|
 | `goal` | str | What result is wanted (one sentence, verifiable) |
-| `context` | str | Key data **embedded inline** (never a file path — executing LLMs have no file access) |
+| `context` | str | Prose context (key data should go in `context_fields`) |
+| `context_fields` | dict\|None | Structured data block `field: value` rendered as 【数据】; non-str values JSON-encoded; treated as system input (not instructions) |
 | `constraints` | str | Boundaries / prohibitions / output format |
 | `acceptance` | str | Checkable acceptance criteria |
 | `task_id` | str | Unique id (generated if omitted) |
@@ -99,6 +100,11 @@ pending ────────► processing ────────► done 
    ▲                  │
    └── timeout (submitter-side, idempotent cleanup)
 ```
+
+## Compatibility (0.3)
+
+- `context_fields` added as a new optional field — **backward compatible**: `from_dict` filters unknown keys and fills missing fields with defaults, so old workers read new tasks (field dropped) and new workers read old tasks (field defaults to None).
+- `parse_three_state` returning a 3-tuple is a **breaking change** vs 0.1 — consumers must unpack 3 values.
 
 ## Stability notes
 

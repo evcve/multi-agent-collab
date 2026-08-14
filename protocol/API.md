@@ -112,3 +112,16 @@ pending ────────► processing ────────► done 
   in sync when adding fields (additive only).
 - `FileQueue` is safe for one-writer/one-reader; multiple workers need a lock or a real broker
   (the file layer is the *protocol*, not a high-concurrency transport).
+
+## 任务状态语义（v0.4+：目录即状态）
+
+任务生命周期由**文件位置**决定（权威），`status` 字段是运行时信息：
+
+| 目录 | 语义 |
+|---|---|
+| `queue/` | 待办（scan 收走） |
+| `processing/` | 处理中（claim 原子认领进入——先刷新 mtime 再 rename；recover_stale 按 mtime 卡死重放） |
+| `results/` | 完成（wait_result 消费） |
+
+存量兼容：旧版 `queue/` 内 `status=processing` 的遗留文件在新版会被当作待办
+重新调度（目录即状态）——停机升级场景是恢复行为，不是重复执行。**不支持热升级**（旧 worker 与新版并存会双执行）——版本切换必须停机。

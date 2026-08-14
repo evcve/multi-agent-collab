@@ -56,3 +56,6 @@ python scripts/review.py --diff-file /tmp/change.diff --strict
 - [ ] commit message 规范：短标题 + Why/What 分层
 - [ ] 协议字段变更评估兼容性（新增=向后兼容，改名/删字段=破坏）
 - [ ] LLM 输出处理无注入风险（不 eval、不拼 shell）
+
+## 逃生通道（谨慎使用）
+- 测试门禁可绕过：`git push --no-verify`（仅在明确知道在做什么时用——绕过 = 责任自负）

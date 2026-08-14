@@ -50,7 +50,7 @@ class FileQueue:
 
     # ── 提交方 ─────────────────────────────────────────────
     def submit(self, task: Task) -> str:
-        """入队并返回 task_id（幂等：同名任务已在 processing/ 时拒绝新副本）。"""
+        """入队并返回 task_id；同名任务已在 processing/ 时拒绝（防双实例）。"""
         if not self._valid_task_id(task.task_id):
             raise ValueError(f"非法 task_id: {task.task_id!r}（仅允许字母数字-_，≤64）")
         if os.path.exists(os.path.join(self.processing_dir, f"{task.task_id}.json")):
@@ -126,9 +126,9 @@ class FileQueue:
         src = os.path.join(self.queue_dir, f"{task_id}.json")
         dst = os.path.join(self.processing_dir, f"{task_id}.json")
         try:
-            os.rename(src, dst)
             now = time.time()
-            os.utime(dst, (now, now))   # 更新 mtime，防立即被判定 stale
+            os.utime(src, (now, now))   # 先刷新源 mtime（rename 保留 mtime）
+            os.rename(src, dst)         # 再原子移动——刚认领的不会被误判 stale
             return True
         except OSError:
             return False

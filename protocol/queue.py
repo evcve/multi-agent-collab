@@ -34,16 +34,16 @@ class FileQueue:
         """原子写：临时文件 + os.replace；Windows 上目标文件可能被短暂锁定
         （杀毒/索引），replace 失败小退避重试。"""
         tmp_path = path + ".tmp"
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
                 os.replace(tmp_path, path)
                 return
             except PermissionError:
-                if attempt == 2:
+                if attempt == 4:
                     raise
-                time.sleep(0.1)
+                time.sleep(0.3)
 
     # ── 提交方 ─────────────────────────────────────────────
     def submit(self, task: Task) -> str:
@@ -127,16 +127,21 @@ class FileQueue:
         self._write_queue(task)
 
     def _iter_tasks(self):
-        """遍历队列目录的任务文件，产出 (task_id, Task, path)。"""
+        """遍历队列目录的任务文件，产出 (task_id, Task, path)。
+
+        注意：必须在 yield 前关闭文件（with 块内完成读取）——Windows 上
+        replace 打开中的文件会 PermissionError；生成器挂起时句柄不能残留。
+        """
         for fn in sorted(os.listdir(self.queue_dir)):
             if not fn.endswith(".json"):
                 continue
             path = os.path.join(self.queue_dir, fn)
             try:
                 with open(path, encoding="utf-8") as f:
-                    yield fn[:-5], Task.from_dict(json.load(f)), path
+                    task = Task.from_dict(json.load(f))
             except (json.JSONDecodeError, OSError):
                 continue
+            yield fn[:-5], task, path
 
     def recover_stale(self, stale_after: float = 300.0) -> list:
         """崩溃恢复：把卡死的 processing 任务重置为 pending（重放）。

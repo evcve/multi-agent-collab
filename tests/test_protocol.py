@@ -271,15 +271,13 @@ def test_parse_no_indexerror_on_bare_marker():
 
 # ── Kimi 使用者反馈优化：崩溃恢复 / schema 重试 / 健康检查 ──────
 def test_recover_stale_resets_processing(tmp_path):
-    """Kimi：crash 即丢消息 → 卡死 processing 任务应能重放。"""
+    """崩溃恢复：卡死 processing 任务应能重放。"""
     q = FileQueue(str(tmp_path))
     t = Task(goal="g")
     q.submit(t)
     q.mark_processing(t)                       # 模拟 worker 取走
-    path = os.path.join(q.queue_dir, f"{t.task_id}.json")
-    old = time.time() - 9999                   # 把 mtime 改老 → 视为卡死
-    os.utime(path, (old, old))
-    recovered = q.recover_stale(stale_after=300)
+    # stale_after=0：任何 processing 都视为卡死（无需改 mtime，避开 Windows utime 锁）
+    recovered = q.recover_stale(stale_after=0)
     assert t.task_id in recovered
     tasks = q.scan()
     assert len(tasks) == 1 and tasks[0].status == "pending"

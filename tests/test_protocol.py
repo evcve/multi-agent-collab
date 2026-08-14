@@ -504,3 +504,20 @@ def test_parse_chinese_alias_failed():
 def test_parse_json_fallback():
     s, r, _, _ = parse_three_state('{"status": "done", "result": "完成"}')
     assert s == "done" and r == "完成"
+
+
+# ── 协议桥实战测试发现的修复：跨平台路径 + 大文件前缀读 ──
+def test_resolve_path_windows_on_windows():
+    """Windows 侧：存在的 Windows 路径原样返回（不误转）。"""
+    from protocol.worker import _resolve_path
+    p = os.path.abspath(__file__)
+    assert _resolve_path(p) == p
+
+
+def test_read_file_prefix_of_large_file(tmp_path):
+    """大文件允许读前缀（只读 N 字符，不加载整个文件）。"""
+    from protocol.worker import _safe_read_file
+    big = tmp_path / "big.bin"
+    big.write_text("A" * 2000000)   # 2MB，超过旧 512KB 限制
+    out = _safe_read_file(str(big), max_chars=100)
+    assert "A" * 100 in out and "(截断)" in out

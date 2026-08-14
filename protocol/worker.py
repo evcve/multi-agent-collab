@@ -14,6 +14,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -338,11 +339,28 @@ def _safe_calc(expr: str) -> str:
         return f"计算错误: {e}"
 
 
+def _resolve_path(path: str) -> str:
+    """跨平台路径解析：server 运行在 WSL 时，Windows 路径（D:/...）转 /mnt/d/...。
+
+    协议桥可能跑在 Windows 或 WSL——提交方习惯 Windows 路径，
+    工具必须兼容（本次实测发现的真问题）。
+    """
+    if os.path.exists(path):
+        return path
+    is_wsl = os.path.exists("/proc/version") and "microsoft" in open("/proc/version").read().lower()
+    if is_wsl and re.match(r"^[A-Za-z]:[/\\]", path):
+        drive, rest = path[0].lower(), path[2:].replace("\\", "/")
+        mapped = f"/mnt/{drive}{rest}"
+        if os.path.exists(mapped):
+            return mapped
+    return path
+
+
 def _safe_read_file(path: str, max_chars: int = 4000) -> str:
-    """只读文件（大小限制 + 忽略二进制）。"""
+    """只读文件前缀（大文件也允许读开头——只 seek 读 N 字符，不加载整个文件）。"""
+    path = _resolve_path(path)
+    max_chars = min(int(max_chars), 8000)   # 单次读取上限（防超量）
     try:
-        if os.path.getsize(path) > 512 * 1024:
-            return "错误: 文件超过 512KB 限制"
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read(max_chars)
         return content if len(content) < max_chars else content + "\n...(截断)"

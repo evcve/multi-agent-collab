@@ -24,9 +24,11 @@ class FileQueue:
 
     def __init__(self, base_dir: str):
         self.queue_dir = os.path.join(base_dir, "queue")
+        self.processing_dir = os.path.join(base_dir, "processing")
         self.results_dir = os.path.join(base_dir, "results")
         self.cancel_dir = os.path.join(base_dir, "cancel")
         os.makedirs(self.queue_dir, exist_ok=True)
+        os.makedirs(self.processing_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
         os.makedirs(self.cancel_dir, exist_ok=True)
 
@@ -100,8 +102,29 @@ class FileQueue:
                     result=f"No worker responded within {timeout}s.")
 
     # ── worker 侧 ──────────────────────────────────────────
+    def claim(self, task_id: str) -> bool:
+        """原子认领：rename 任务文件 queue/ → processing/（原子互斥）。
+
+        并发下只有一个 worker 能成功 rename（其他得到 OSError）——
+        彻底消除"处理完成释放锁后另一 worker 又认领"的竞态。
+        """
+        src = os.path.join(self.queue_dir, f"{task_id}.json")
+        dst = os.path.join(self.processing_dir, f"{task_id}.json")
+        try:
+            os.rename(src, dst)
+            return True
+        except OSError:
+            return False
+
+    def release(self, task_id: str):
+        """处理完成：删除 processing 文件（结果已写 results/）。"""
+        try:
+            os.unlink(os.path.join(self.processing_dir, f"{task_id}.json"))
+        except OSError:
+            pass
+
     def scan(self) -> list[Task]:
-        """扫描 pending 任务，按优先级排序（high > normal > low），跳过已取消。"""
+        """扫描 pending 任务（queue/ 目录），按优先级排序，跳过已取消。"""
         tasks = []
         for fn in sorted(os.listdir(self.queue_dir)):
             if not fn.endswith(".json"):
@@ -144,34 +167,45 @@ class FileQueue:
             yield fn[:-5], task, path
 
     def recover_stale(self, stale_after: float = 300.0) -> list:
-        """崩溃恢复：把卡死的 processing 任务重置为 pending（重放）。
+        """崩溃恢复：把卡死的 processing 任务重放回 queue/（rename 回，原子）。
 
-        判据：任务文件 mtime（= 最后一次心跳/写入时间）超过 stale_after 秒
-        且状态为 processing → 视为 worker 已崩溃，重置 pending 让其他 worker 接手。
-        worker 侧有心跳线程定期更新 mtime，长任务不会被误判。
-        注意：不重置 progress 字段（业务层自行决定是否断点续算）。
+        判据：processing/ 下任务文件 mtime（= 最后一次心跳/写入时间）超过
+        stale_after 秒 → 视为 worker 已崩溃，重置 pending 让其他 worker 接手。
+        心跳线程定期更新 mtime，长任务不会被误判；不重置 progress 字段。
         """
         recovered = []
         now = time.time()
-        for task_id, t, path in self._iter_tasks():
-            if t.status == "processing" and (now - os.path.getmtime(path)) > stale_after:
-                t.status = "pending"
-                self._write_queue(t)
+        for fn in sorted(os.listdir(self.processing_dir)):
+            if not fn.endswith(".json"):
+                continue
+            path = os.path.join(self.processing_dir, fn)
+            task_id = fn[:-5]
+            if (now - os.path.getmtime(path)) <= stale_after:
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    t = Task.from_dict(json.load(f))
+                t.status = "pending"   # 不重置 progress：业务层判断
+                self._atomic_write(os.path.join(self.queue_dir, fn), t.to_dict())
+                os.unlink(path)
                 recovered.append(task_id)
+            except (json.JSONDecodeError, OSError):
+                continue
         return recovered
 
     def health(self, stale_after: float = 300.0) -> dict:
         """队列健康报告：pending/processing 计数 + 卡死任务清单。"""
-        pending = processing = 0
+        pending = len([f for f in os.listdir(self.queue_dir) if f.endswith(".json")])
+        processing = 0
         stale = []
         now = time.time()
-        for task_id, t, path in self._iter_tasks():
-            if t.status == "processing":
-                processing += 1
-                if (now - os.path.getmtime(path)) > stale_after:
-                    stale.append(task_id)
-            elif t.status == "pending":
-                pending += 1
+        for fn in sorted(os.listdir(self.processing_dir)):
+            if not fn.endswith(".json"):
+                continue
+            processing += 1
+            path = os.path.join(self.processing_dir, fn)
+            if (now - os.path.getmtime(path)) > stale_after:
+                stale.append(fn[:-5])
         return {"pending": pending, "processing": processing,
                 "stale_processing": stale}
 
@@ -199,7 +233,7 @@ class FileQueue:
 
     def mark_processing(self, task: Task):
         task.status = "processing"
-        self._write_queue(task)
+        self._write_task_file(task)
 
     def complete(self, task: Task):
         """写结果文件并删队列文件（原子写，防并发读半截）。
@@ -208,6 +242,7 @@ class FileQueue:
         """
         self._atomic_write(os.path.join(self.results_dir, f"{task.task_id}.json"),
                            task.to_dict())
+        self.release(task.task_id)   # 删 processing 文件（结果已落盘）
         try:
             os.unlink(os.path.join(self.queue_dir, f"{task.task_id}.json"))
         except OSError:
@@ -216,6 +251,25 @@ class FileQueue:
             os.unlink(os.path.join(self.cancel_dir, f"{task.task_id}.marker"))
         except OSError:
             pass
+
+    def report_progress(self, task: Task, progress: int, note: str = ""):
+        """心跳：更新任务文件的进度字段（worker 长任务中间态回报）。"""
+        task.progress = max(0, min(100, progress))
+        task.progress_note = note or task.progress_note
+        self._write_task_file(task)
+
+    def _write_task_file(self, task: Task):
+        """写任务文件到其当前所在目录（processing/ 优先，否则 queue/）。
+
+        claim 后任务在 processing/，写错目录会留幽灵文件。
+        """
+        for d in (self.processing_dir, self.queue_dir):
+            p = os.path.join(d, f"{task.task_id}.json")
+            if os.path.exists(p):
+                self._atomic_write(p, task.to_dict())
+                return
+        self._atomic_write(os.path.join(self.queue_dir, f"{task.task_id}.json"),
+                           task.to_dict())
 
     def _write_queue(self, task: Task):
         self._atomic_write(os.path.join(self.queue_dir, f"{task.task_id}.json"),

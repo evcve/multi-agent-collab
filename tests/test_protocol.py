@@ -278,13 +278,13 @@ def test_parse_no_indexerror_on_bare_marker():
 
 # ── Kimi 使用者反馈优化：崩溃恢复 / schema 重试 / 健康检查 ──────
 def test_recover_stale_resets_processing(tmp_path):
-    """崩溃恢复：卡死 processing 任务应能重放。"""
+    """崩溃恢复：卡死 processing 任务应能重放（rename 回 queue/）。"""
     q = FileQueue(str(tmp_path))
     t = Task(goal="g")
     q.submit(t)
-    q.mark_processing(t)                       # 模拟 worker 取走
-    # stale_after=0：任何 processing 都视为卡死（无需改 mtime，避开 Windows utime 锁）
-    recovered = q.recover_stale(stale_after=0)
+    assert q.claim(t.task_id)                  # 模拟 worker 取走（rename 到 processing/）
+    # stale_after=-1：任何 processing 都视为卡死
+    recovered = q.recover_stale(stale_after=-1)
     assert t.task_id in recovered
     tasks = q.scan()
     assert len(tasks) == 1 and tasks[0].status == "pending"
@@ -294,7 +294,7 @@ def test_recover_stale_keeps_fresh_processing(tmp_path):
     q = FileQueue(str(tmp_path))
     t = Task(goal="g")
     q.submit(t)
-    q.mark_processing(t)                       # mtime 是新的 → 不算卡死
+    assert q.claim(t.task_id)                  # mtime 是新的 → 不算卡死
     assert q.recover_stale(stale_after=300) == []
 
 
@@ -304,7 +304,7 @@ def test_health_report(tmp_path):
     t2 = Task(goal="b")
     q.submit(t1)
     q.submit(t2)
-    q.mark_processing(t2)
+    assert q.claim(t2.task_id)                 # t2 处理中
     h = q.health(stale_after=300)
     assert h["pending"] == 1 and h["processing"] == 1
     assert h["stale_processing"] == []

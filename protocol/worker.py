@@ -39,7 +39,14 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
     LLM_BASE_URL / LLM_API_KEY / LLM_MODEL / LLM_MAX_TOKENS
     key 按 base_url 联动选择：bigmodel→ZHIPUAI_API_KEY、moonshot→KIMI_API_KEY、
     其他→LLM_API_KEY（避免把错误 key 发给目标端点）。
+
+    可重试错误（429/5xx/网络/超时）自动重试 3 次（2s/5s 退避）；
+    业务错误（4xx 其他、空 content）不重试，直接抛。
     """
+    import time as _t
+    import urllib.error as _uerror
+    import urllib.request as _urllib
+
     base_url = os.environ.get("LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
     model = os.environ.get("LLM_MODEL", "glm-5.2")
     max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "8000"))
@@ -52,6 +59,7 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
     if not api_key:
         raise RuntimeError(f"未找到 {base_url} 对应的 API key"
                            "（智谱: ZHIPUAI_API_KEY / Kimi: KIMI_API_KEY / 通用: LLM_API_KEY）")
+
     body = json.dumps({
         "model": model,
         "messages": [
@@ -61,16 +69,35 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
         "temperature": 0.3,
         "max_tokens": max_tokens,
     }).encode("utf-8")
-    req = urllib.request.Request(f"{base_url}/chat/completions", data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    msg = data["choices"][0]["message"]
-    content = (msg.get("content") or "").strip()
-    if not content:
-        raise RuntimeError("模型返回空 content（thinking 吃光 max_tokens？请调大 LLM_MAX_TOKENS）")
-    return content
+
+    def _once():
+        req = _urllib.Request(f"{base_url}/chat/completions", data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {api_key}")
+        with _urllib.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        msg = data["choices"][0]["message"]
+        content = (msg.get("content") or "").strip()
+        if not content:
+            raise RuntimeError("模型返回空 content（thinking 吃光 max_tokens？请调大 LLM_MAX_TOKENS）")
+        return content
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            return _once()
+        except (_uerror.HTTPError, _uerror.URLError, TimeoutError, OSError) as e:
+            # 仅 429/5xx/网络类可重试
+            retryable = True
+            if isinstance(e, _uerror.HTTPError) and e.code not in (429, 500, 502, 503, 504):
+                retryable = False
+            last_err = e
+            if not retryable or attempt == 2:
+                raise
+            _t.sleep(2 * (attempt + 1))
+        except Exception as e:
+            raise
+    raise last_err if last_err else RuntimeError("LLM 调用失败")
 
 
 STATUS_ALIASES = {
@@ -406,6 +433,9 @@ def extract_tool_calls(raw: str) -> list:
 
 
 def process_one(task: Task, q: FileQueue) -> None:
+    # 原子认领：并发下只有一个 worker 处理（防重复消费）
+    if not q.claim(task.task_id):
+        return
     q.mark_processing(task)
     if q.is_cancelled(task.task_id):
         task.status = "failed"

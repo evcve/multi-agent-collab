@@ -17,6 +17,8 @@ class Task:
     context_fields: Optional[dict] = None  # 结构化数据字段（field: value 块），LLM 直接解析不靠猜
     constraints: str = ""          # 约束：边界/禁止事项/输出格式
     acceptance: str = ""           # 验收标准：可检查的交付物（可配合 result_schema 自动核验）
+    tools: Optional[list] = None   # 任务需要的工具名列表（须 ⊆ worker 白名单 ALLOWED_TOOLS，默认 None=无工具）
+    request_summary: bool = False  # 请求 worker 额外输出一行 [摘要]（长任务分块链用，省上下文）
     # 运行时字段
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     target_agent: str = "worker"
@@ -45,6 +47,11 @@ class Task:
             parts.append(f"【约束】{self.constraints}")
         if self.acceptance:
             parts.append(f"【验收标准】{self.acceptance}")
+        if self.tools:
+            parts.append("【可用工具】需要查数据/计算时，输出工具请求行（可多行）：\n"
+                         "[工具] <名称> <参数JSON>\n"
+                         "工具结果会以【工具结果】(系统输出)反馈给你，然后你继续。"
+                         f"可用: {', '.join(self.tools)}")
         if self.result_schema is not None:
             parts.append("【输出要求】[结果] 必须是合法 JSON；校验仅覆盖数据类型与必填字段"
                          "（不支持 pattern/enum/minLength 等高级约束）：\n"
@@ -52,8 +59,10 @@ class Task:
         parts.append("【反馈格式】按以下三态输出：\n"
                      "[状态] done / failed / need_confirm\n"
                      "[结果] <内容>\n"
-                     "[备注] <可选：解释/建议/原因，不参与状态判断>\n"
-                     "不确定就说不知道，绝不编造。")
+                     "[备注] <可选：解释/建议/原因，不参与状态判断>")
+        if self.request_summary:
+            parts.append("[摘要] <一行总结，供后续任务引用（约 50 字）>")
+        parts.append("不确定就说不知道，绝不编造。")
         return "\n".join(parts)
 
     def to_dict(self) -> dict:

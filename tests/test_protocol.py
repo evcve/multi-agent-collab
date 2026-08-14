@@ -37,31 +37,31 @@ def test_task_roundtrip_dict():
 
 # ── 三态解析 ────────────────────────────────────────────────────────
 def test_parse_three_state_done():
-    s, r, _ = parse_three_state("[状态] done\n[结果] 完成，文件 /tmp/a.json")
+    s, r, _, _ = parse_three_state("[状态] done\n[结果] 完成，文件 /tmp/a.json")
     assert s == "done" and "/tmp/a.json" in r
 
 
 def test_parse_three_state_failed_and_confirm():
-    s, r, _ = parse_three_state("[状态] failed\n[结果] 权限不足")
+    s, r, _, _ = parse_three_state("[状态] failed\n[结果] 权限不足")
     assert s == "failed"
-    s2, _, _ = parse_three_state("[状态] need_confirm\n[结果] 选项A/选项B")
+    s2, _, _, _ = parse_three_state("[状态] need_confirm\n[结果] 选项A/选项B")
     assert s2 == "need_confirm"
 
 
 def test_parse_three_state_missing_status_is_failed():
     """防误报：无 [状态] 标记时绝不能静默当 done。"""
-    s, r, _ = parse_three_state("好的，我完成了任务！")   # LLM 自由文本
+    s, r, _, _ = parse_three_state("好的，我完成了任务！")   # LLM 自由文本
     assert s == "failed"
     assert "三态格式" in r
 
 
 def test_parse_three_state_unknown_status_is_failed():
-    s, _, _ = parse_three_state("[状态] maybe\n[结果] 不确定")
+    s, _, _, _ = parse_three_state("[状态] maybe\n[结果] 不确定")
     assert s == "failed"
 
 
 def test_parse_three_state_status_without_result_keeps_status():
-    s, r, _ = parse_three_state("[状态] done\n输出了一些内容")
+    s, r, _, _ = parse_three_state("[状态] done\n输出了一些内容")
     assert s == "done"
 
 
@@ -112,7 +112,7 @@ def test_scan_only_pending(tmp_path):
 
 # ── V0.2 新特性：备注 / 优先级 / 取消 / Schema / 进度 ─────────────
 def test_parse_note_channel():
-    s, r, note = parse_three_state("[状态] done\n[结果] 完成\n[备注] 用了方法X")
+    s, r, note, _ = parse_three_state("[状态] done\n[结果] 完成\n[备注] 用了方法X")
     assert s == "done" and note == "用了方法X"
 
 
@@ -256,7 +256,7 @@ def test_cancel_marker_cleaned_on_complete(tmp_path):
 
 def test_multiline_note_supported():
     """Kimi P1：备注应支持多行（自由文本语义）。"""
-    s, r, note = parse_three_state(
+    s, r, note, _ = parse_three_state(
         "[状态] done\n[结果] 完成\n[备注] 第一行\n第二行\n第三行")
     assert s == "done"
     assert note == "第一行\n第二行\n第三行"
@@ -264,9 +264,9 @@ def test_multiline_note_supported():
 
 def test_parse_no_indexerror_on_bare_marker():
     """智谱 P0：`[状态]` 无内容行不能 IndexError 崩溃，应安全解析为 failed。"""
-    s, r, _ = parse_three_state("[状态]\n[结果]")
+    s, r, _, _ = parse_three_state("[状态]\n[结果]")
     assert s == "failed"            # 空状态 → failed
-    s2, _, _ = parse_three_state("[状态] done\n[结果]")   # [结果] 无内容
+    s2, _, _, _ = parse_three_state("[状态] done\n[结果]")   # [结果] 无内容
     assert s2 == "done"             # 状态有效，结果回退原文
 
 
@@ -375,7 +375,7 @@ def test_gc_removes_old_results(tmp_path):
 
 
 def test_layout_case_fake_engine_finds_conflicts():
-    """真实用例：fake 几何引擎正确检出冲突（5 个）。"""
+    """真实用例：fake 几何引擎正确检出冲突（6 个，含双命中）。"""
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -387,3 +387,98 @@ def test_layout_case_fake_engine_finds_conflicts():
     data = json.loads(raw.split("[结果] ")[1].splitlines()[0])
     assert data["total_holes"] == 7
     assert len(data["conflicts"]) == 6   # EQ-A 孔0 同时撞 H2 和 V3 → 双命中
+
+
+# ── S3 白名单工具 ────────────────────────────────────────────────
+def test_safe_calc_basic():
+    from protocol.worker import _safe_calc
+    assert _safe_calc("40*30") == "1200"
+    assert _safe_calc("sqrt(16)") == "4.0"
+    assert _safe_calc("(2+3)*4") == "20"
+
+
+def test_safe_calc_rejects_unsafe():
+    from protocol.worker import _safe_calc
+    assert "错误" in _safe_calc("__import__('os').system('dir')")
+    assert "错误" in _safe_calc("'a'*1000")
+    assert "错误" in _safe_calc("open('x').read()")
+
+
+def test_execute_tool_whitelist_rejection(monkeypatch):
+    from protocol.worker import execute_tool
+    monkeypatch.setenv("ALLOWED_TOOLS", "calc")   # 只允许 calc
+    import protocol.worker as W
+    W.ALLOWED_TOOLS = ["calc"]
+    assert "不在 worker 白名单" in execute_tool("read_file", '{"path": "/etc/passwd"}')
+    assert execute_tool("calc", '{"expr": "1+1"}') == "2"
+
+
+def test_extract_tool_calls():
+    from protocol.worker import extract_tool_calls
+    raw = "[工具] calc {\"expr\": \"1+1\"}\n[工具] list_dir {\"path\": \".\"}\n[状态] done"
+    calls = extract_tool_calls(raw)
+    assert calls == [("calc", '{"expr": "1+1"}'), ("list_dir", '{"path": "."}')]
+
+
+def test_tool_loop_executes_and_finishes(tmp_path, monkeypatch):
+    """工具循环：LLM 先请求工具 → 拿到结果 → 输出三态。"""
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="计算 40*30", tools=["calc"])
+    q.submit(t)
+    calls = []
+    def fake(prompt, **kw):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return '[工具] calc {"expr": "40*30"}'
+        assert "【工具结果】" in prompt and "1200" in prompt  # 工具结果已反馈
+        return '[状态] done\n[结果] 结果是 1200'
+    monkeypatch.setattr("protocol.worker.call_llm", fake)
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "done"
+    assert got.result_meta.get("tool_rounds") == 1
+    assert len(calls) == 2
+
+
+def test_tool_loop_hits_limit(tmp_path, monkeypatch):
+    """工具循环超过上限 → failed。"""
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g", tools=["calc"])
+    q.submit(t)
+    def fake(prompt, **kw):
+        return '[工具] calc {"expr": "1+1"}'
+    monkeypatch.setattr("protocol.worker.call_llm", fake)
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "failed"
+    assert "上限" in got.result
+
+
+# ── S4 分块摘要 ──────────────────────────────────────────────────
+def test_parse_summary():
+    s, r, n, sm = parse_three_state(
+        "[状态] done\n[结果] 完成\n[摘要] 布局分析完成，5 处冲突")
+    assert s == "done" and sm == "布局分析完成，5 处冲突"
+
+
+def test_summary_stored_in_meta(tmp_path, monkeypatch):
+    """worker 把 [摘要] 存入 result_meta.summary（分块链用）。"""
+    from protocol.worker import process_one
+    q = FileQueue(str(tmp_path))
+    t = Task(goal="g", request_summary=True)
+    q.submit(t)
+    monkeypatch.setattr("protocol.worker.call_llm",
+                        lambda prompt, **kw: "[状态] done\n[结果] ok\n[摘要] 第一块完成")
+    process_one(t, q)
+    got = q.wait_result(t.task_id, timeout=5)
+    assert got.status == "done"
+    assert got.result_meta.get("summary") == "第一块完成"
+
+
+def test_summary_requested_in_prompt():
+    t = Task(goal="g", request_summary=True)
+    assert "[摘要]" in t.prompt
+    t2 = Task(goal="g")
+    assert "[摘要]" not in t2.prompt

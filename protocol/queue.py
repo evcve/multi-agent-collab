@@ -30,14 +30,26 @@ class FileQueue:
         os.makedirs(self.results_dir, exist_ok=True)
         os.makedirs(self.cancel_dir, exist_ok=True)
 
+    def _atomic_write(self, path: str, data: dict):
+        """原子写：临时文件 + os.replace；Windows 上目标文件可能被短暂锁定
+        （杀毒/索引），replace 失败小退避重试。"""
+        tmp_path = path + ".tmp"
+        for attempt in range(3):
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+                os.replace(tmp_path, path)
+                return
+            except PermissionError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.1)
+
     # ── 提交方 ─────────────────────────────────────────────
     def submit(self, task: Task) -> str:
         """入队并返回 task_id。"""
-        path = os.path.join(self.queue_dir, f"{task.task_id}.json")
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(task.to_dict(), f, ensure_ascii=False)
-        os.replace(tmp_path, path)
+        self._atomic_write(os.path.join(self.queue_dir, f"{task.task_id}.json"),
+                           task.to_dict())
         return task.task_id
 
     def cancel(self, task_id: str) -> None:
@@ -163,15 +175,12 @@ class FileQueue:
         self._write_queue(task)
 
     def complete(self, task: Task):
-        """写结果文件并删队列文件（原子写：临时文件 + os.replace，防并发读半截）。
+        """写结果文件并删队列文件（原子写，防并发读半截）。
 
         同时清理该任务的取消标记（避免 cancel 目录无限增长）。
         """
-        result_path = os.path.join(self.results_dir, f"{task.task_id}.json")
-        tmp_path = result_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(task.to_dict(), f, ensure_ascii=False)
-        os.replace(tmp_path, result_path)   # 原子替换
+        self._atomic_write(os.path.join(self.results_dir, f"{task.task_id}.json"),
+                           task.to_dict())
         try:
             os.unlink(os.path.join(self.queue_dir, f"{task.task_id}.json"))
         except OSError:
@@ -182,8 +191,5 @@ class FileQueue:
             pass
 
     def _write_queue(self, task: Task):
-        path = os.path.join(self.queue_dir, f"{task.task_id}.json")
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(task.to_dict(), f, ensure_ascii=False)
-        os.replace(tmp_path, path)
+        self._atomic_write(os.path.join(self.queue_dir, f"{task.task_id}.json"),
+                           task.to_dict())

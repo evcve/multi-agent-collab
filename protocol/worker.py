@@ -40,8 +40,8 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
     key 按 base_url 联动选择：bigmodel→ZHIPUAI_API_KEY、moonshot→KIMI_API_KEY、
     其他→LLM_API_KEY（避免把错误 key 发给目标端点）。
 
-    可重试错误（429/5xx/网络/超时）自动重试 3 次（2s/5s 退避）；
-    业务错误（4xx 其他、空 content）不重试，直接抛。
+    可重试错误（429/5xx/网络/超时）自动重试：最多 3 次请求（第 1 次失败后
+    退避 2s，第 2 次失败后退避 4s）；业务错误（4xx 其他、空 content）不重试，直接抛。
     """
     import time as _t
     import urllib.error as _uerror

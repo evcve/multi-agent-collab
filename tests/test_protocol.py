@@ -112,8 +112,8 @@ def test_scan_only_pending(tmp_path):
     q = FileQueue(str(tmp_path))
     t = Task(goal="g")
     q.submit(t)
-    q.mark_processing(t)
-    assert q.scan() == []   # processing 不算 pending
+    q.claim(t.task_id)              # 取走（rename 到 processing/）
+    assert q.scan() == []           # 已认领不算待办
 
 
 # ── V0.2 新特性：备注 / 优先级 / 取消 / Schema / 进度 ─────────────

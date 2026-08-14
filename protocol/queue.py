@@ -13,6 +13,7 @@
 """
 import json
 import os
+import re
 import time
 from typing import Optional
 
@@ -49,7 +50,11 @@ class FileQueue:
 
     # ── 提交方 ─────────────────────────────────────────────
     def submit(self, task: Task) -> str:
-        """入队并返回 task_id。"""
+        """入队并返回 task_id（幂等：同名任务已在 processing/ 时拒绝新副本）。"""
+        if not self._valid_task_id(task.task_id):
+            raise ValueError(f"非法 task_id: {task.task_id!r}（仅允许字母数字-_，≤64）")
+        if os.path.exists(os.path.join(self.processing_dir, f"{task.task_id}.json")):
+            raise ValueError(f"task_id {task.task_id} 正在处理中，拒绝重复提交")
         self._atomic_write(os.path.join(self.queue_dir, f"{task.task_id}.json"),
                            task.to_dict())
         return task.task_id
@@ -102,42 +107,58 @@ class FileQueue:
                     result=f"No worker responded within {timeout}s.")
 
     # ── worker 侧 ──────────────────────────────────────────
+    _TASK_ID_RE = None
+
+    @classmethod
+    def _valid_task_id(cls, task_id: str) -> bool:
+        """task_id 路径安全校验（防路径穿越：../ 等注入）。"""
+        return bool(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id or ""))
+
     def claim(self, task_id: str) -> bool:
         """原子认领：rename 任务文件 queue/ → processing/（原子互斥）。
 
         并发下只有一个 worker 能成功 rename（其他得到 OSError）——
         彻底消除"处理完成释放锁后另一 worker 又认领"的竞态。
+        认领后 touch mtime：刚认领的任务不能被 recover_stale 误判卡死。
         """
+        if not self._valid_task_id(task_id):
+            return False
         src = os.path.join(self.queue_dir, f"{task_id}.json")
         dst = os.path.join(self.processing_dir, f"{task_id}.json")
         try:
             os.rename(src, dst)
+            now = time.time()
+            os.utime(dst, (now, now))   # 更新 mtime，防立即被判定 stale
             return True
         except OSError:
             return False
 
     def release(self, task_id: str):
         """处理完成：删除 processing 文件（结果已写 results/）。"""
+        if not self._valid_task_id(task_id):
+            return
         try:
             os.unlink(os.path.join(self.processing_dir, f"{task_id}.json"))
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"[queue] WARNING: release {task_id} 失败: {e}")
 
     def scan(self) -> list[Task]:
-        """扫描 pending 任务（queue/ 目录），按优先级排序，跳过已取消。"""
+        """扫描待办任务（queue/ 目录存在即 pending——目录即状态，不读 status 字段）。
+
+        queue/ = 待办、processing/ = 处理中、results/ = 完成。
+        """
         tasks = []
         for fn in sorted(os.listdir(self.queue_dir)):
             if not fn.endswith(".json"):
                 continue
-            path = os.path.join(self.queue_dir, fn)
             task_id = fn[:-5]
-            if self.is_cancelled(task_id):
+            if not self._valid_task_id(task_id) or self.is_cancelled(task_id):
                 continue
+            path = os.path.join(self.queue_dir, fn)
             try:
                 with open(path, encoding="utf-8") as f:
                     t = Task.from_dict(json.load(f))
-                if t.status == "pending":
-                    tasks.append(t)
+                tasks.append(t)
             except (json.JSONDecodeError, OSError):
                 continue
         tasks.sort(key=lambda t: self.PRIORITY_ORDER.get(t.priority, 1))
@@ -167,14 +188,16 @@ class FileQueue:
             yield fn[:-5], task, path
 
     def recover_stale(self, stale_after: float = 300.0) -> list:
-        """崩溃恢复：把卡死的 processing 任务重放回 queue/（rename 回，原子）。
+        """崩溃恢复：卡死任务原子 rename 回 queue/（真 rename，无读写窗口）。
 
-        判据：processing/ 下任务文件 mtime（= 最后一次心跳/写入时间）超过
-        stale_after 秒 → 视为 worker 已崩溃，重置 pending 让其他 worker 接手。
-        心跳线程定期更新 mtime，长任务不会被误判；不重置 progress 字段。
+        判据：processing/ 下文件 mtime（= 最后一次心跳/写入时间）超过 stale_after
+        秒 → 视为 worker 崩溃。rename 是原子的——不存在"读了再写"的竞态窗口。
+        损坏文件移到 .corrupt/ 不中断恢复；status 字段是运行时信息，
+        目录位置才是权威状态（scan 不依赖 status）。
         """
         recovered = []
         now = time.time()
+        corrupt_dir = os.path.join(os.path.dirname(self.queue_dir), "corrupt")
         for fn in sorted(os.listdir(self.processing_dir)):
             if not fn.endswith(".json"):
                 continue
@@ -184,13 +207,20 @@ class FileQueue:
                 continue
             try:
                 with open(path, encoding="utf-8") as f:
-                    t = Task.from_dict(json.load(f))
-                t.status = "pending"   # 不重置 progress：业务层判断
-                self._atomic_write(os.path.join(self.queue_dir, fn), t.to_dict())
-                os.unlink(path)
-                recovered.append(task_id)
-            except (json.JSONDecodeError, OSError):
+                    Task.from_dict(json.load(f))     # 验证可解析（损坏→corrupt）
+            except Exception as e:
+                os.makedirs(corrupt_dir, exist_ok=True)
+                try:
+                    os.rename(path, os.path.join(corrupt_dir, fn))
+                except OSError:
+                    pass
+                print(f"[queue] recover_stale: {fn} 损坏，移到 corrupt/ ({e})")
                 continue
+            try:
+                os.rename(path, os.path.join(self.queue_dir, fn))   # 原子放回
+                recovered.append(task_id)
+            except OSError:
+                continue   # 窗口内被 complete 删了（结果已在 results/）→ 安全跳过
         return recovered
 
     def health(self, stale_after: float = 300.0) -> dict:

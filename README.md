@@ -28,20 +28,28 @@
 | 路径 | 内容 |
 |---|---|
 | [`COLLABORATION.md`](COLLABORATION.md) | 协作模式协议：任务四要素、三态反馈、心跳/中断、成本分级、纪律 |
+| [`protocol/`](protocol/) | **协作通讯主程序（可运行）**：文件队列 + worker + 三态反馈，纯 stdlib，任何 OpenAI 兼容 LLM 可用 |
 | [`tools/`](tools/) | 工程工具：DXF 几何解析、FEM 安装孔提取、干涉检测（通用，含示例数据） |
 | `examples/` | 示例数据（非真实项目数据） |
 
 ## 快速开始
 
 ```bash
-# 工具示例：从 DXF 提取横竖条带（热管/槽道等 40mm 宽带）
+# 1. 跑通协作通讯协议（无需 API key，模拟 worker）
+python -m protocol.demo --fake
+
+# 2. 真实 LLM（OpenAI 兼容端点）
+export LLM_BASE_URL=https://api.deepseek.com/v1
+export LLM_API_KEY=sk-xxx
+python -m protocol.demo
+
+# 3. 常驻 worker（独立进程消费队列）
+python -m protocol.worker --queue-dir ./runtime
+
+# 4. 工具示例：DXF 条带提取 / FEM 安装孔 / 干涉检测
 python tools/dxf_rect_extract.py examples/sample_bands.dxf
-
-# FEM RBE2 安装孔提取（质量点 rigid 连接的板节点 = 安装孔位置）
-python tools/fem_rbe2_holes.py examples/sample_model.fem
-
-# 干涉检测：孔 vs 条带
-python tools/interference_check.py --holes holes.csv --bands bands.csv
+python tools/fem_rbe2_holes.py examples/sample_model.fem --nodes 45,44,43
+python tools/interference_check.py --holes examples/sample_holes.csv --bands examples/sample_bands.csv
 ```
 
 ## 为什么值得看

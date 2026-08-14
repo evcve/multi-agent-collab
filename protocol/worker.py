@@ -36,16 +36,21 @@ def call_llm(prompt: str, timeout: int = 120) -> str:
     """调 OpenAI 兼容端点；默认智谱 glm-5.2，可用环境变量覆盖。
 
     LLM_BASE_URL / LLM_API_KEY / LLM_MODEL / LLM_MAX_TOKENS
-    兼容读取 ZHIPUAI_API_KEY / KIMI_API_KEY（按 provider 自动选 key）。
+    key 按 base_url 联动选择：bigmodel→ZHIPUAI_API_KEY、moonshot→KIMI_API_KEY、
+    其他→LLM_API_KEY（避免把错误 key 发给目标端点）。
     """
     base_url = os.environ.get("LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
-    api_key = (os.environ.get("LLM_API_KEY")
-               or os.environ.get("ZHIPUAI_API_KEY")
-               or os.environ.get("KIMI_API_KEY", ""))
     model = os.environ.get("LLM_MODEL", "glm-5.2")
     max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "8000"))
+    if "bigmodel" in base_url:
+        api_key = os.environ.get("LLM_API_KEY") or os.environ.get("ZHIPUAI_API_KEY", "")
+    elif "moonshot" in base_url:
+        api_key = os.environ.get("LLM_API_KEY") or os.environ.get("KIMI_API_KEY", "")
+    else:
+        api_key = os.environ.get("LLM_API_KEY", "")
     if not api_key:
-        raise RuntimeError("LLM_API_KEY 未设置（或 ZHIPUAI_API_KEY / KIMI_API_KEY）")
+        raise RuntimeError(f"未找到 {base_url} 对应的 API key"
+                           "（智谱: ZHIPUAI_API_KEY / Kimi: KIMI_API_KEY / 通用: LLM_API_KEY）")
     body = json.dumps({
         "model": model,
         "messages": [
@@ -150,10 +155,12 @@ def parse_three_state(raw: str) -> tuple[str, str, str, str]:
         j = _try_json(raw)
         if j:
             return j
-        # 宽容降级仅限"缺失状态"：有非空 [结果] 视为 done（真实 LLM 常漏状态行）；
+        # 宽容降级仅限"缺失状态"：有非空 [结果] 视为 done（真实 LLM 常漏状态行），
+        # 但降级会被调用方标记 format_loose（见 process_one）供提交方判断；
         # "未知状态"（明确输出了非标准值）仍 failed——更值得警惕。
         if not status and result and result.strip():
             status = "done"
+            note = (note + "\n" if note else "") + "[loose]"  # 降级标记，调用方提取
         else:
             return "failed", f"LLM 输出未遵循三态格式（缺 [状态] 标记）: {raw[:200]}", note, ""
     if result is None:
@@ -221,6 +228,10 @@ def _coerce_json(result: str):
     """
     result = (result or "").strip()
     if not result:
+        return None
+    # 错误文本黑名单：'Error code 404'、'请求失败' 等不能清洗成数字误判通过
+    if any(m in result.lower() for m in ("error", "fail", "exception", "timeout",
+                                         "错误", "失败", "拒绝", "超时")):
         return None
     try:
         return json.loads(result)
@@ -434,6 +445,9 @@ def process_one(task: Task, q: FileQueue) -> None:
     meta = {"finished_at": time.time(), "retryable": status == "failed"}
     if note:
         meta["note"] = note
+    if "[loose]" in note:               # 宽容降级标记 → 提交方可判断结果可信度
+        meta["format_loose"] = True
+        meta["note"] = note.replace("[loose]", "").strip()
     if summary:
         meta["summary"] = summary
     if tool_rounds:

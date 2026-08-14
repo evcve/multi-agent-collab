@@ -61,7 +61,7 @@ def call_llm(prompt: str, timeout: int = 180) -> str:
             {"role": "user", "content": prompt},
         ],
         "temperature": temperature,
-        "max_tokens": 8000,  # 推理模型 thinking 会吃 token，给足否则 content 为空
+        "max_tokens": int(os.environ.get("REVIEW_MAX_TOKENS", "8000")),  # 推理模型 thinking 会吃 token，大 diff 调大
     }).encode("utf-8")
     req = urllib.request.Request(f"{BASE_URL}/chat/completions", data=body, method="POST")
     req.add_header("Content-Type", "application/json")

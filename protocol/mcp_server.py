@@ -7,7 +7,7 @@
 内部从"简单队列 + 外部 60s cron worker"升级为完整 protocol 内核：
 - 结构化参数：context_fields / tools / result_schema / priority / request_summary
 - 三态反馈 + meta（summary / validation / tool_rounds）
-- 白名单工具执行 + Schema 校验反馈重试 + 分块摘要 + 崩溃恢复 + 健康检查
+- 白名单工具执行 + Schema 校验反馈重试 + 分块摘要 + 崩溃恢复（recover_stale）
 - worker 常驻线程 2s 轮询（秒级响应，超越现役 cron 轮询延迟）
 
 运行: python -m protocol.mcp_server --port 8766
@@ -95,10 +95,10 @@ def _submit_and_wait(task_text: str, timeout: int, context_fields=None,
 
 
 @mcp.tool()
-async def call_openclaw(task: str, timeout: int = 300,
-                        context_fields: dict = None, tools: list = None,
-                        result_schema: dict = None, priority: str = "normal",
-                        request_summary: bool = False) -> str:
+def call_openclaw(task: str, timeout: int = 300,
+                  context_fields: dict = None, tools: list = None,
+                  result_schema: dict = None, priority: str = "normal",
+                  request_summary: bool = False) -> str:
     """Delegate a task to the collaboration execution layer (protocol kernel).
 
     Backward-compatible superset of the legacy bridge tool: same name, same
@@ -123,7 +123,7 @@ async def call_openclaw(task: str, timeout: int = 300,
 
 
 @mcp.tool()
-async def delegate_to_servant(task: str, timeout: int = 300) -> str:
+def delegate_to_servant(task: str, timeout: int = 300) -> str:
     """Delegate a simple task to the execution unit (lightweight semantics).
 
     Args:
@@ -144,7 +144,9 @@ def _ensure_api_key():
     """
     if os.environ.get("LLM_API_KEY") or os.environ.get("ZHIPUAI_API_KEY"):
         return
-    candidates = [
+    # 可配置 key 文件（PROTOCOL_KEYFILE），默认尝试 WSL 智谱 key 与 ~/.hermes/.env
+    keyfile = os.environ.get("PROTOCOL_KEYFILE", "")
+    candidates = ([keyfile] if keyfile else []) + [
         r"//wsl.localhost/PCMClawUbuntu/root/.zhipu_key",   # WSL 智谱 key 权威位置
         os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")),
                      ".hermes", ".env"),
@@ -169,7 +171,7 @@ def _ensure_api_key():
         except Exception:
             continue
     print("[protocol-bridge] 警告: 未找到 LLM API key"
-          "（设 LLM_API_KEY 或 ZHIPUAI_API_KEY 或 WSL /root/.zhipu_key）")
+          "（设 LLM_API_KEY/ZHIPUAI_API_KEY 或 PROTOCOL_KEYFILE 指定 key 文件）")
 
 
 def main():

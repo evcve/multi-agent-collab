@@ -281,6 +281,142 @@ def _coerce_json(result: str):
     return None
 
 
+def _eval_logic_rule(rule: str, data) -> tuple:
+    """安全求值一条逻辑约束（ast 白名单，防注入）。
+
+    支持：字段引用（data 的键/索引）、数值、比较（> < >= <= == !=）、
+    逻辑（and or not）、括号、内置函数 abs()。
+    返回 (ok, 错误信息)。任何语法/类型异常都视为约束失败（fail-safe）。
+    """
+    import ast as _ast
+
+    allowed_funcs = {"abs": abs}
+
+    def _resolve(node):
+        if isinstance(node, _ast.Constant):
+            return node.value
+        if isinstance(node, _ast.Name):
+            return _resolve_name(node.id)
+        if isinstance(node, _ast.BinOp):
+            a, b = _resolve(node.left), _resolve(node.right)
+            if isinstance(node.op, _ast.Add):
+                return a + b
+            if isinstance(node.op, _ast.Sub):
+                return a - b
+            if isinstance(node.op, _ast.Mult):
+                return a * b
+            if isinstance(node.op, _ast.Div):
+                return a / b
+            if isinstance(node.op, _ast.Mod):
+                return a % b
+            if isinstance(node.op, _ast.Pow):
+                return a ** b
+            raise ValueError(f"不支持运算符 {type(node.op).__name__}")
+        if isinstance(node, _ast.UnaryOp):
+            v = _resolve(node.operand)
+            if isinstance(node.op, _ast.USub):
+                return -v
+            if isinstance(node.op, _ast.Not):
+                return not v
+            raise ValueError("不支持的一元运算符")
+        if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name):
+            if node.func.id not in allowed_funcs:
+                raise ValueError(f"不允许的函数 {node.func.id}")
+            args = [_resolve(a) for a in node.args]
+            return allowed_funcs[node.func.id](*args)
+        if isinstance(node, _ast.Compare):
+            ops = {_ast.Gt: ">", _ast.Lt: "<", _ast.GtE: ">=",
+                   _ast.LtE: "<=", _ast.Eq: "==", _ast.NotEq: "!="}
+            # 链式比较按 Python 语义：0 < x < 10 等价 (0<x) and (x<10)
+            prev = _resolve(node.left)
+            results = []
+            for op_node, comp_node in zip(node.ops, node.comparators):
+                right = _resolve(comp_node)
+                op = ops.get(type(op_node))
+                if op is None:
+                    raise ValueError(f"不支持比较 {type(op_node).__name__}")
+                if op == ">":
+                    results.append(prev > right)
+                elif op == "<":
+                    results.append(prev < right)
+                elif op == ">=":
+                    results.append(prev >= right)
+                elif op == "<=":
+                    results.append(prev <= right)
+                elif op == "==":
+                    results.append(prev == right)
+                elif op == "!=":
+                    results.append(prev != right)
+                prev = right
+            return all(results)
+        if isinstance(node, _ast.BoolOp):
+            op = _ast.And if isinstance(node.op, _ast.And) else _ast.Or
+            values = [_resolve(v) for v in node.values]
+            if op is _ast.And:
+                return all(values)
+            return any(values)
+        raise ValueError(f"不支持的表达式节点 {type(node).__name__}")
+
+    def _resolve_name(name):
+        if isinstance(data, dict) and name in data:
+            return data[name]
+        raise ValueError(f"字段 {name!r} 不在结果中")
+
+    try:
+        tree = _ast.parse(rule, mode="eval")
+        result = _resolve(tree.body)
+        return bool(result), ""
+    except Exception as e:
+        return False, f"约束求值失败: {e}"
+
+
+def check_output_constraints(task: Task, result: str) -> tuple:
+    """程序化验证链：JSON 结构 → Schema → 正则 → 逻辑约束（全程序，无 LLM）。
+
+    返回 (ok, [失败原因])。
+    """
+    errors = []
+    data = None
+    try:
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        # 先尝试清洗（真实 LLM 常带杂质，如 "56088（工具计算）"）
+        data = _coerce_json(result)
+        if data is None:
+            errors.append("结果不是合法 JSON")
+            return False, errors
+
+    if task.result_schema is not None:
+        schema_errs = validate_schema(data, task.result_schema)
+        if schema_errs:
+            errors.append("Schema 校验失败: " + "; ".join(schema_errs))
+
+    if task.output_pattern:
+        # 语义：output_pattern 校验 [结果] 的原始输出文本（整体匹配）
+        if len(task.output_pattern) > 128:
+            errors.append("output_pattern 过长（>128 字符），拒绝（防 ReDoS）")
+        else:
+            try:
+                if not re.fullmatch(task.output_pattern, result.strip()):
+                    errors.append(f"输出形态不匹配正则 {task.output_pattern!r}")
+            except re.error as e:
+                errors.append(f"正则无效: {e}")
+
+    if task.logic_rules:
+        for rule in task.logic_rules:
+            if not isinstance(rule, str):
+                errors.append(f"逻辑约束必须为字符串: {rule!r}")
+                continue
+            if len(rule) > 200:
+                errors.append(f"逻辑约束过长（>200 字符）: {rule[:40]}...")
+                continue
+            ok, err = _eval_logic_rule(rule, data)
+            if not ok:
+                errors.append(f"逻辑约束失败: {rule}（{err}）" if err else f"逻辑约束失败: {rule}")
+
+    return (len(errors) == 0), errors
+
+
 def _validate_with_retry(task: Task, status: str, result: str, note: str,
                          q: FileQueue, max_retries: int = 1):
     """结果 schema 校验；失败时把校验错误反馈给 LLM 重试（有次数上限）。
@@ -291,15 +427,12 @@ def _validate_with_retry(task: Task, status: str, result: str, note: str,
     """
     attempts = 0
     while True:
-        data = _coerce_json(result)
-        if data is None:
-            errs = ["结果不是合法 JSON"]
-        else:
-            errs = validate_schema(data, task.result_schema)
-        if not errs:
+        # 完整验证链（全程序）：JSON 结构 → Schema → 正则 → 逻辑约束
+        ok, errs = check_output_constraints(task, result)
+        if ok:
             return status, result, note, "ok"
         if attempts >= max_retries:
-            return "failed", f"结果未通过 schema 校验: {'; '.join(errs)}", note, errs
+            return "failed", f"结果未通过校验: {'; '.join(errs)}", note, errs
         # 反馈校验错误，让 LLM 修正一次（分隔符隔离，防 prompt 注入：
         # 反馈内容标注为系统校验结果，不是任务指令）
         feedback = (task.prompt +

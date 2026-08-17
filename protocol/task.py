@@ -17,6 +17,8 @@ class Task:
     context_fields: Optional[dict] = None  # 结构化数据字段（field: value 块），LLM 直接解析不靠猜
     constraints: str = ""          # 约束：边界/禁止事项/输出格式
     acceptance: str = ""           # 验收标准：可检查的交付物（可配合 result_schema 自动核验）
+    output_pattern: Optional[str] = None  # 结果值形态正则（如 ^\d+(\.\d+)?$ —— 程序校验）
+    logic_rules: Optional[list] = None    # 逻辑约束（如 ["x > -800", "abs(z) <= 400"]，ast 安全求值）
     tools: Optional[list] = None   # 任务需要的工具名列表（须 ⊆ worker 白名单 ALLOWED_TOOLS，默认 None=无工具）
     request_summary: bool = False  # 请求 worker 额外输出一行 [摘要]（长任务分块链用，省上下文）
     # 运行时字段
@@ -55,9 +57,15 @@ class Task:
                          "不需要工具时直接输出 [状态]。\n"
                          f"可用工具: {', '.join(self.tools)}")
         if self.result_schema is not None:
-            parts.append("【输出要求】[结果] 必须是合法 JSON；校验仅覆盖数据类型与必填字段"
-                         "（不支持 pattern/enum/minLength 等高级约束）：\n"
+            parts.append("【输出要求】结果必须是通过 JSON Schema 校验的 JSON"
+                         "（仅校验类型与必填字段）：\n"
                          f"{json.dumps(self.result_schema, ensure_ascii=False)}")
+        if self.output_pattern:
+            parts.append("【输出形态】[结果] 的输出文本必须整体匹配正则（程序校验，不满足即 failed）：\n"
+                         f"  {self.output_pattern}")
+        if self.logic_rules:
+            parts.append("【逻辑约束】结果字段必须满足以下规则（程序校验，不满足即 failed）：\n"
+                         + "\n".join(f"  - {r}" for r in self.logic_rules))
         parts.append("【反馈格式】按以下三态输出：\n"
                      "[状态] done / failed / need_confirm\n"
                      "[结果] <内容>\n"

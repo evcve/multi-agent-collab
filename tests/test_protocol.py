@@ -180,7 +180,7 @@ def test_schema_validation_fails_wrong_type(tmp_path, monkeypatch):
     got = q.wait_result(t.task_id, timeout=5)
     assert got.status == "failed"
     assert got.result_meta.get("retryable") is False
-    assert "schema" in got.result
+    assert "schema" in got.result.lower()
 
 
 def test_progress_callback_receives_heartbeat(tmp_path):
@@ -347,7 +347,7 @@ def test_schema_retry_gives_up_after_limit(tmp_path, monkeypatch):
     got = q.wait_result(t.task_id, timeout=5)
     assert got.status == "failed"
     assert got.result_meta.get("retryable") is False
-    assert "schema" in got.result
+    assert "schema" in got.result.lower()
 
 
 # ── 作战计划：S1 结构化字段 / B7 TTL 清理 / 真实用例 ───────────
@@ -522,3 +522,93 @@ def test_read_file_prefix_of_large_file(tmp_path):
     big.write_text("A" * 2000000)   # 2MB，超过旧 512KB 限制
     out = _safe_read_file(str(big), max_chars=100)
     assert "A" * 100 in out and "(截断)" in out
+
+
+# ── 混合约束：自然语言 + 正则 + 逻辑规则 + Schema（程序化验证链）──
+def test_output_pattern_regex_validation():
+    """正则约束：不匹配 → failed（程序校验，非 LLM 判断）。"""
+    from protocol.worker import check_output_constraints
+    from protocol.task import Task
+    t = Task(goal="g", output_pattern=r"^-?\d+(\.\d+)?$")
+    ok, errs = check_output_constraints(t, "42.5")
+    assert ok
+    ok, errs = check_output_constraints(t, "42.5kg")
+    assert not ok and "正则" in errs[0]
+
+
+def test_logic_rules_validation():
+    """逻辑约束：跨字段物理边界 → 程序校验。"""
+    from protocol.worker import check_output_constraints
+    from protocol.task import Task
+    t = Task(goal="g", logic_rules=["x > -800", "x < 800", "abs(z) <= 400", "mass > 0"])
+    ok, errs = check_output_constraints(t, '{"x": 100, "z": -202, "mass": 2.9}')
+    assert ok
+    ok, errs = check_output_constraints(t, '{"x": 950, "z": -202, "mass": 2.9}')
+    assert not ok and "x > -800" in errs[0] or any("x < 800" in e for e in errs)
+
+
+def test_logic_rules_injection_blocked():
+    """注入防护：__import__/属性访问/函数调用被拒（fail-safe）。"""
+    from protocol.worker import _eval_logic_rule
+    ok, err = _eval_logic_rule("__import__('os').system('x')", {})
+    assert not ok and ("不允许" in err or "不支持" in err)
+    ok, err = _eval_logic_rule("open('/etc/passwd')", {})
+    assert not ok
+
+
+def test_logic_rules_missing_field_fails():
+    """字段缺失 → 约束失败（不静默通过）。"""
+    from protocol.worker import _eval_logic_rule
+    ok, err = _eval_logic_rule("y > 0", {"x": 1})
+    assert not ok and "不在结果" in err
+
+
+def test_constraints_chain_order():
+    """验证链：JSON 结构 → Schema → 正则 → 逻辑（全程序）。"""
+    from protocol.worker import check_output_constraints
+    from protocol.task import Task
+    t = Task(goal="g",
+             result_schema={"type": "object", "required": ["x"]},
+             output_pattern=r"^\{.*\}$",
+             logic_rules=["x >= 0"])
+    # 全部满足
+    ok, errs = check_output_constraints(t, '{"x": 5}')
+    assert ok
+    # 逻辑不满足
+    ok, errs = check_output_constraints(t, '{"x": -5}')
+    assert not ok and any("逻辑约束" in e for e in errs)
+    # 结构不满足
+    ok, errs = check_output_constraints(t, '{"y": 5}')
+    assert not ok and any("Schema" in e for e in errs)
+
+
+def test_coerce_json_still_works_with_constraints():
+    """清洗兼容：带杂质的数字结果经清洗后可通过正则+逻辑校验。"""
+    from protocol.worker import check_output_constraints
+    from protocol.task import Task
+    t = Task(goal="g", output_pattern=r"-?\d+(\.\d+)?")
+    ok, errs = check_output_constraints(t, "56088（工具计算得出）")
+    # 清洗后 data=56088，但 output_pattern 对原始串匹配失败——形态约束诚实报错
+    assert not ok
+    ok, errs = check_output_constraints(t, "42.5")
+    assert ok
+
+
+def test_logic_rules_chained_comparison():
+    """链式比较：0 < x < 10 按 Python 语义（and 连接），非 bool<int 陷阱。"""
+    from protocol.worker import check_output_constraints
+    from protocol.task import Task
+    t = Task(goal="g", logic_rules=["0 < x < 10"])
+    ok, _ = check_output_constraints(t, '{"x": 5}')
+    assert ok
+    ok, errs = check_output_constraints(t, '{"x": 50}')
+    assert not ok
+
+
+def test_output_pattern_length_limit():
+    """ReDoS 防护：超长正则拒绝。"""
+    from protocol.worker import check_output_constraints
+    from protocol.task import Task
+    t = Task(goal="g", output_pattern="a" * 200)
+    ok, errs = check_output_constraints(t, "42")
+    assert not ok and "过长" in errs[0]
